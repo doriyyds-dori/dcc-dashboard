@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+import os
 
 # ================= 1. 页面配置 =================
 st.set_page_config(page_title="Audi DCC 效能看板", layout="wide", page_icon="🏎️")
@@ -15,25 +16,83 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 侧边栏 =================
-with st.sidebar:
-    st.header("📂 数据上传")
-    file_f = st.file_uploader("1. 漏斗指标表 (含小计行)", type=["xlsx", "csv"])
-    file_d = st.file_uploader("2. 管家排名表 (含质检分)", type=["xlsx", "csv"])
-    file_a = st.file_uploader("3. AMS跟进表 (含时长)", type=["xlsx", "csv"])
+# ================= 2. 只有我能更新数据 (安全锁) =================
 
-# ================= 3. 数据处理 =================
-def smart_read(file):
+# 设定您的管理员密码 (请修改这里！)
+ADMIN_PASSWORD = "audi" 
+
+# 定义数据保存的文件夹
+DATA_DIR = "data_store"
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+
+# 定义三个文件的保存路径
+PATH_F = os.path.join(DATA_DIR, "funnel.xlsx")
+PATH_D = os.path.join(DATA_DIR, "dcc.xlsx")
+PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
+
+def save_uploaded_file(uploaded_file, save_path):
+    with open(save_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return True
+
+# ================= 3. 侧边栏逻辑 =================
+with st.sidebar:
+    st.header("⚙️ 管理面板")
+    
+    # 检查本地是否已有数据
+    has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(PATH_A)
+    
+    if has_data:
+        st.success("✅ 当前正在使用：已存档的历史数据")
+        st.caption("刷新页面数据也不会丢失。")
+    else:
+        st.warning("⚠️ 暂无数据，请登录后上传。")
+    
+    st.markdown("---")
+    
+    # 管理员登录框
+    with st.expander("🔐 更新数据 (仅限管理员)"):
+        pwd = st.text_input("输入管理员密码", type="password")
+        
+        if pwd == ADMIN_PASSWORD:
+            st.info("🔓 身份验证成功，请上传新文件覆盖旧数据：")
+            
+            new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
+            new_d = st.file_uploader("2. 管家排名表", type=["xlsx", "csv"])
+            new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
+            
+            if st.button("🚀 确认更新数据"):
+                if new_f and new_d and new_a:
+                    save_uploaded_file(new_f, PATH_F)
+                    save_uploaded_file(new_d, PATH_D)
+                    save_uploaded_file(new_a, PATH_A)
+                    st.success("数据已更新！正在刷新页面...")
+                    st.rerun() # 强制刷新页面读取新数据
+                else:
+                    st.error("请先上传全部 3 个文件再点击更新。")
+        elif pwd:
+            st.error("密码错误")
+
+# ================= 4. 数据处理 (读取本地文件) =================
+def smart_read(file_path):
     try:
-        if file.name.endswith('.csv'): return pd.read_csv(file)
-        else: return pd.read_excel(file)
+        # 判断是上传对象还是本地路径
+        if isinstance(file_path, str):
+            # 本地路径读取
+            if file_path.endswith('.csv'): return pd.read_csv(file_path)
+            else: return pd.read_excel(file_path)
+        else:
+            # 上传对象读取 (兼容旧逻辑，虽其实用不到了)
+            if file_path.name.endswith('.csv'): return pd.read_csv(file_path)
+            else: return pd.read_excel(file_path)
     except: return None
 
-def process_data(f_file, d_file, a_file):
+def process_data(path_f, path_d, path_a):
     try:
-        raw_f = smart_read(f_file)
-        raw_d = smart_read(d_file)
-        raw_a = smart_read(a_file)
+        raw_f = smart_read(path_f)
+        raw_d = smart_read(path_d)
+        raw_a = smart_read(path_a)
 
         if raw_f is None or raw_d is None or raw_a is None: return None, None
 
@@ -49,20 +108,15 @@ def process_data(f_file, d_file, a_file):
         
         df_f = raw_f.rename(columns=rename_dict)
         
-        # 分离
         df_store_data = df_f[df_f['邀约专员/管家'].astype(str).str.contains('小计', na=False)].copy()
         df_advisor_data = df_f[~df_f['邀约专员/管家'].astype(str).str.contains('计|-', na=False)].copy()
 
-        # 清洗
         for df in [df_store_data, df_advisor_data]:
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
             
-            # 【逻辑】直接取值，不计算
             if 'Excel_Rate' in df.columns:
                 df['Excel_Rate'] = pd.to_numeric(df['Excel_Rate'], errors='coerce').fillna(0)
-                # 判断：如果最大值>1 (如5.2)，说明是5.2%，除以100变成小数用于排序和绘图
-                # 如果最大值<1 (如0.05)，说明是小数，直接用
                 if df['Excel_Rate'].max() > 1.0:
                     df['线索到店率_数值'] = df['Excel_Rate'] / 100
                 else:
@@ -70,8 +124,6 @@ def process_data(f_file, d_file, a_file):
             else:
                 df['线索到店率_数值'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
             
-            # 【强制转换】生成一列专门用于显示的字符串列 "5.2%"
-            # 这样表格显示绝对不会错
             df['线索到店率'] = (df['线索到店率_数值'] * 100).map('{:.1f}%'.format)
 
         # --- B. DCC ---
@@ -108,16 +160,17 @@ def process_data(f_file, d_file, a_file):
         st.error(f"处理出错: {e}")
         return None, None
 
-# ================= 4. 界面渲染 =================
+# ================= 5. 界面渲染 =================
 
-if file_f and file_d and file_a:
-    df_advisors, df_stores = process_data(file_f, file_d, file_a)
+# 核心修改：不再检测上传控件，而是检测本地文件是否存在
+if has_data:
+    df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A)
     
     if df_advisors is not None:
         
         # --- 顶部布局 ---
         col_header, col_filter = st.columns([3, 1])
-        with col_header: st.title("Audi | DCC 效能看板") # 已修改标题
+        with col_header: st.title("Audi | DCC 效能看板")
         with col_filter:
             if not df_stores.empty: all_stores = sorted(list(df_stores['门店名称'].unique()))
             else: all_stores = sorted(list(df_advisors['门店名称'].unique()))
@@ -161,11 +214,7 @@ if file_f and file_d and file_a:
         
         with c_left:
             st.markdown(f"### {rank_title}")
-            
-            # 【核心】这里使用 '线索到店率_数值' 来排序，但展示用 '线索到店率' (字符串)
             rank_df = current_df[['名称', '线索到店率', '线索到店率_数值', '质检总分']].sort_values('线索到店率_数值', ascending=False).head(15)
-            
-            # 最终展示的表格只保留字符串格式的率
             display_df = rank_df[['名称', '线索到店率', '质检总分']]
             
             st.dataframe(
@@ -175,7 +224,7 @@ if file_f and file_d and file_a:
                 height=400,
                 column_config={
                     "名称": st.column_config.TextColumn("名称"),
-                    "线索到店率": st.column_config.TextColumn("线索到店率"), # 强制作为文本显示，如 "5.2%"
+                    "线索到店率": st.column_config.TextColumn("线索到店率"),
                     "质检总分": st.column_config.NumberColumn("质检总分", format="%.1f")
                 }
             )
@@ -183,19 +232,14 @@ if file_f and file_d and file_a:
         with c_right:
             st.markdown("### 💡 话术质量 vs 转化结果")
             plot_df = current_df.copy()
-            # 绘图还是得用数值
             plot_df['转化率%'] = plot_df['线索到店率_数值'] * 100
             
             fig = px.scatter(
                 plot_df, 
-                x="S_Time", 
-                y="转化率%", 
-                size="线索量", 
-                color="质检总分",
+                x="S_Time", y="转化率%", size="线索量", color="质检总分",
                 hover_name="名称",
                 labels={"S_Time": "明确到店得分", "转化率%": "线索到店率(%)"},
-                color_continuous_scale="Reds",
-                height=400
+                color_continuous_scale="Reds", height=400
             )
             if not plot_df.empty:
                 fig.add_vline(x=plot_df['S_Time'].mean(), line_dash="dash", line_color="gray")
@@ -225,7 +269,6 @@ if file_f and file_d and file_a:
                         ))
                         fig_f.update_layout(showlegend=False, height=180, margin=dict(t=0,b=0,l=0,r=0))
                         st.plotly_chart(fig_f, use_container_width=True)
-                        # 这里也直接用处理好的字符串
                         st.metric("线索到店率", p['线索到店率']) 
                         st.caption(f"平均通话时长: {p['通话时长']:.1f} 秒")
 
@@ -258,4 +301,6 @@ if file_f and file_d and file_a:
                 else:
                     st.warning("该门店下暂无顾问数据。")
 else:
-    st.info("👈 请在左侧上传三个文件")
+    # 第一次进入，没有数据时的欢迎页
+    st.info("👋 欢迎使用 Audi 效能看板！")
+    st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
