@@ -19,7 +19,7 @@ st.markdown("""
 # ================= 2. 安全锁与文件存储 =================
 
 # 设定您的管理员密码
-ADMIN_PASSWORD = "AudiSARR3" 
+ADMIN_PASSWORD = "audi" 
 
 DATA_DIR = "data_store"
 if not os.path.exists(DATA_DIR):
@@ -175,7 +175,7 @@ if has_data:
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
-            rank_title = f"👤 {selected_store} - 顾问排名"
+            rank_title = f"👤 {selected_store} - 邀约专员/管家排名"
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
@@ -214,7 +214,6 @@ if has_data:
             plot_df = current_df.copy()
             plot_df['转化率%'] = plot_df['线索到店率_数值'] * 100
             
-            # --- 核心修改：文案调整 ---
             fig = px.scatter(
                 plot_df, 
                 x="S_Time", 
@@ -222,12 +221,11 @@ if has_data:
                 size="线索量", 
                 color="质检总分",
                 hover_name="名称",
-                labels={"S_Time": "明确到店时间得分", "转化率%": "线索到店率(%)"}, # X轴标签也改了
+                labels={"S_Time": "明确到店时间得分", "转化率%": "线索到店率(%)"},
                 color_continuous_scale="Reds", 
                 height=400
             )
 
-            # 更新悬停内容
             fig.update_traces(
                 customdata=np.stack((
                     plot_df['线索量'], 
@@ -241,7 +239,7 @@ if has_data:
                     "线索量: %{customdata[0]:,}<br>" +
                     "线索到店率: %{customdata[1]:.1%}<br>" +
                     "质检总分: %{customdata[2]:.1f}<br>" +
-                    "明确到店时间得分: %{customdata[3]:.1f}" +  # 这里改成了“明确到店时间得分”
+                    "明确到店时间得分: %{customdata[3]:.1f}" +
                     "<extra></extra>"
                 )
             )
@@ -259,7 +257,10 @@ if has_data:
             else:
                 diag_list = sorted(current_df['邀约专员/管家'].unique())
                 if len(diag_list) > 0:
-                    selected_person = st.selectbox("🔍 选择/搜索该店顾问：", diag_list)
+                    # -------------------------------------------------------------
+                    # 修改位置：这里的标签已改为 "选择/搜索该店邀约专员/管家："
+                    # -------------------------------------------------------------
+                    selected_person = st.selectbox("🔍 选择/搜索该店邀约专员/管家：", diag_list)
                     p = df_advisors[df_advisors['邀约专员/管家'] == selected_person].iloc[0]
                     
                     d1, d2, d3 = st.columns([1, 1, 1.2])
@@ -279,8 +280,12 @@ if has_data:
                     with d2:
                         st.caption("质检得分详情 (QUALITY)")
                         metrics = {
-                            "明确到店时间": p['S_Time'], "60秒通话占比": p['S_60s'],
-                            "车型信息介绍": p['S_Car'], "政策相关话术": p['S_Policy'], "添加微信": p['S_Wechat']
+                            "明确到店时间": p['S_Time'], 
+                            "60秒通话占比": p['S_60s'],
+                            "用车需求": p['S_Needs'], 
+                            "车型信息介绍": p['S_Car'], 
+                            "政策相关话术": p['S_Policy'], 
+                            "添加微信": p['S_Wechat']
                         }
                         for k, v in metrics.items():
                             c_a, c_b = st.columns([3, 1])
@@ -290,7 +295,7 @@ if has_data:
 
                     with d3:
                         with st.container():
-                            st.error("🤖 诊断建议")
+                            st.error("🤖 AI 智能诊断建议")
                             issues = []
                             if p['S_Time'] < 60:
                                 st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。")
@@ -303,7 +308,7 @@ if has_data:
                                 issues.append(1)
                             if not issues: st.success("各项指标表现优秀！")
                 else:
-                    st.warning("该门店下暂无顾问数据。")
+                    st.warning("该门店下暂无数据。")
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
