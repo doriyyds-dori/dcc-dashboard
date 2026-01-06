@@ -1,1 +1,4 @@
-pandas plotly openpyxl streamlit
+streamlit
+pandas
+plotly
+openpyxl
