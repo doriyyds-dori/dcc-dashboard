@@ -75,7 +75,7 @@ def clean_percent_col(df, col_name):
     else:
         df[col_name] = numeric_series
 
-# --- 新增：安全除法函数 ---
+# --- 安全除法函数 ---
 def safe_div(df, num_col, denom_col):
     """计算两列相除，处理分母为0的情况"""
     num = pd.to_numeric(df[num_col], errors='coerce').fillna(0)
@@ -123,49 +123,61 @@ def process_data(path_f, path_d, path_a):
         df_d['S_Wechat'] = raw_d[wechat_col]
         df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
 
-        # --- C. AMS (核心修正：基于分子分母计算) ---
+        # --- C. AMS (核心修正：严格按照分子分母计算) ---
         
-        # 1. 定义需要的原始列名 (和代码内部列名的映射)
-        # 格式： 'Excel里的列名片段': '代码里用的临时名'
-        raw_cols_mapping = {
-            '管家姓名': '邀约专员/管家', 
-            'DCC平均通话时长': '通话时长',
-            # 接通率相关
-            'DCC接通线索数': 'conn_num',
-            'DCC外呼线索数': 'conn_denom',
-            # 及时处理率相关
-            'DCC及时处理线索': 'timely_num',
-            '需外呼线索数': 'timely_denom',
-            # 二呼率相关
-            '二次外呼线索数': 'call2_num',
-            '需再呼线索数': 'call2_denom',
-            # 三呼率相关
-            'DCC三次外呼的线索数': 'call3_num',
-            'DCC二呼状态为需再呼的线索数': 'call3_denom'
-        }
+        # 1. 定义映射关系：{ 'Excel原始列名关键词': '代码内部变量名' }
+        # 我们使用 list 来存储可能的列名匹配，确保找到最准确的那个
+        cols_config = [
+            ({'管家姓名'}, '邀约专员/管家'),
+            ({'DCC平均通话时长'}, '通话时长'),
+            
+            # 1. 外呼接通率 = DCC接通线索数 / DCC外呼线索数
+            ({'DCC接通线索数'}, 'conn_num'),
+            ({'DCC外呼线索数'}, 'conn_denom'),
+            
+            # 2. DCC及时处理率 = DCC及时处理线索 / 需外呼线索数
+            ({'DCC及时处理线索'}, 'timely_num'),
+            ({'需外呼线索数'}, 'timely_denom'),
+            
+            # 3. 二次外呼率 = 二次外呼线索数 / 需再呼线索数
+            ({'二次外呼线索数'}, 'call2_num'),
+            ({'需再呼线索数'}, 'call2_denom'),
+            
+            # 4. 三次外呼率 = DCC三次外呼的线索数 / DCC二呼状态为需再呼的线索数
+            ({'DCC三次外呼的线索数', '三次外呼线索数'}, 'call3_num'), # 增加关键词容错
+            ({'DCC二呼状态为需再呼的线索数', '二呼状态为需再呼'}, 'call3_denom')
+        ]
 
-        # 2. 智能重命名 (模糊匹配)
+        # 2. 查找并重命名列
         found_rename_map = {}
-        for raw_key, target in raw_cols_mapping.items():
-            # 在 raw_a.columns 里找包含 raw_key 的列
-            found = next((c for c in raw_a.columns if raw_key in str(c).strip()), None)
-            if found:
-                found_rename_map[found] = target
+        for keywords, target_name in cols_config:
+            # 尝试在 raw_a.columns 中找到包含关键词的列
+            # 优先找最长匹配（更精确），这里简单用第一个匹配到的
+            found_col = None
+            for col in raw_a.columns:
+                for k in keywords:
+                    if k in str(col).strip():
+                        found_col = col
+                        break
+                if found_col: break
+            
+            if found_col:
+                found_rename_map[found_col] = target_name
         
         df_a = raw_a.rename(columns=found_rename_map)
         
-        # 3. 确保所有需要的列都存在，不存在则补0
-        needed_cols = list(raw_cols_mapping.values())
+        # 3. 补齐缺失列（防止报错）
+        needed_cols = ['邀约专员/管家', '通话时长', 'conn_num', 'conn_denom', 'timely_num', 'timely_denom', 'call2_num', 'call2_denom', 'call3_num', 'call3_denom']
         for c in needed_cols:
             if c not in df_a.columns: df_a[c] = 0
             
-        # 4. 【关键步骤】执行除法计算
+        # 4. 【关键】执行除法计算
         df_a['外呼接通率'] = safe_div(df_a, 'conn_num', 'conn_denom')
         df_a['DCC及时处理率'] = safe_div(df_a, 'timely_num', 'timely_denom')
         df_a['DCC二次外呼率'] = safe_div(df_a, 'call2_num', 'call2_denom')
         df_a['DCC三次外呼率'] = safe_div(df_a, 'call3_num', 'call3_denom')
 
-        # 只保留最终计算结果和关键信息
+        # 只保留最终结果
         final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']
         df_a = df_a[final_ams_cols]
 
@@ -250,7 +262,7 @@ if has_data:
         p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         
-        st.caption("注：以上为当前筛选范围内的平均值 (计算方式：分子之和/分母之和 或 平均值)")
+        st.caption("注：以上为当前筛选范围内的平均值")
 
         # 2.2 关联图表
         c_proc_1, c_proc_2 = st.columns(2)
