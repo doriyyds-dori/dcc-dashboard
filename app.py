@@ -175,7 +175,7 @@ if has_data:
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
-            rank_title = f"👤 {selected_store} - 邀约专员/管家排名"
+            rank_title = f"👤 {selected_store} 邀约专员/管家排名"
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
@@ -312,3 +312,4 @@ if has_data:
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
+
