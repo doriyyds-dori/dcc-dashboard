@@ -66,7 +66,6 @@ def smart_read(file_path):
     except: return None
 
 def clean_percent_col(df, col_name):
-    """强健的百分比清洗函数"""
     if col_name not in df.columns: return
     series = df[col_name].astype(str).str.strip().str.replace('%', '', regex=False)
     numeric_series = pd.to_numeric(series, errors='coerce').fillna(0)
@@ -76,7 +75,6 @@ def clean_percent_col(df, col_name):
         df[col_name] = numeric_series
 
 def safe_div(df, num_col, denom_col):
-    """计算两列相除，处理分母为0的情况"""
     num = pd.to_numeric(df[num_col], errors='coerce').fillna(0)
     denom = pd.to_numeric(df[denom_col], errors='coerce').fillna(0)
     return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
@@ -126,7 +124,6 @@ def process_data(path_f, path_d, path_a):
         cols_config = [
             ({'管家姓名'}, '邀约专员/管家'),
             ({'DCC平均通话时长'}, '通话时长'),
-            # 分子分母配置
             ({'DCC接通线索数'}, 'conn_num'), ({'DCC外呼线索数'}, 'conn_denom'),
             ({'DCC及时处理线索'}, 'timely_num'), ({'需外呼线索数'}, 'timely_denom'),
             ({'二次外呼线索数'}, 'call2_num'), ({'需再呼线索数'}, 'call2_denom'),
@@ -147,33 +144,30 @@ def process_data(path_f, path_d, path_a):
         
         df_a = raw_a.rename(columns=found_rename_map)
         
-        # 补全缺失列
         all_ams_calc_cols = ['conn_num', 'conn_denom', 'timely_num', 'timely_denom', 
                              'call2_num', 'call2_denom', 'call3_num', 'call3_denom']
         for c in all_ams_calc_cols:
             if c not in df_a.columns: df_a[c] = 0
             else: df_a[c] = pd.to_numeric(df_a[c], errors='coerce').fillna(0)
 
-        # 计算个人层面的率
         df_a['外呼接通率'] = safe_div(df_a, 'conn_num', 'conn_denom')
         df_a['DCC及时处理率'] = safe_div(df_a, 'timely_num', 'timely_denom')
         df_a['DCC二次外呼率'] = safe_div(df_a, 'call2_num', 'call2_denom')
         df_a['DCC三次外呼率'] = safe_div(df_a, 'call3_num', 'call3_denom')
 
-        # 保留所有分子分母列，供聚合使用
         final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率'] + all_ams_calc_cols
         df_a = df_a[final_ams_cols]
 
-        # --- D. Strip & Merge ---
+        # --- D. Strip & Merge (核心修改点：改为 Left Join) ---
         for df in [df_store_data, df_advisor_data, df_d, df_a]:
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner')
+        # 【核心修正】：使用 left join，确保所有在漏斗名单里的人，即使没有质检分，也会保留其 AMS 数据
+        full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='left')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         full_advisors.fillna(0, inplace=True)
 
-        # 门店聚合：关键是 sum 分子和分母
         agg_dict = {
             '质检总分': 'mean', 'S_Time': 'mean', 'S_60s': 'mean',
             'conn_num': 'sum', 'conn_denom': 'sum',
@@ -183,7 +177,7 @@ def process_data(path_f, path_d, path_a):
         }
         store_scores = full_advisors.groupby('门店名称').agg(agg_dict).reset_index()
         
-        # 聚合后重新计算门店级的率
+        # 聚合后重新计算门店级/全区级的率
         store_scores['外呼接通率'] = safe_div(store_scores, 'conn_num', 'conn_denom')
         store_scores['DCC及时处理率'] = safe_div(store_scores, 'timely_num', 'timely_denom')
         store_scores['DCC二次外呼率'] = safe_div(store_scores, 'call2_num', 'call2_denom')
@@ -242,10 +236,9 @@ if has_data:
         st.markdown("---")
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
         
-        # 2.1 过程指标 KPI (修改点：加权平均计算)
+        # 2.1 过程指标 KPI (加权计算)
         p1, p2, p3, p4 = st.columns(4)
         
-        # 使用 sum() / sum() 计算大盘总率
         def calc_kpi_rate(df, num, denom):
             total_num = df[num].sum()
             total_denom = df[denom].sum()
@@ -261,7 +254,7 @@ if has_data:
         p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         
-        st.caption("注：以上为加权平均值 (总分子 / 总分母)，反映整体水平")
+        st.caption("注：以上为加权平均值 (总分子 / 总分母)")
 
         # 2.2 关联图表
         c_proc_1, c_proc_2 = st.columns(2)
@@ -453,7 +446,7 @@ if has_data:
 
                     with d3:
                         with st.container():
-                            st.error("🤖 AI 智能诊断建议")
+                            st.error("🤖诊断建议")
                             issues = []
                             if p['S_Time'] < 60:
                                 st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。")
