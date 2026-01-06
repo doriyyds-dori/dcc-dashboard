@@ -16,14 +16,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 侧边栏 =================
+# ================= 2. 侧边栏上传 =================
 with st.sidebar:
     st.header("📂 数据上传")
     file_f = st.file_uploader("1. 漏斗指标表 (含小计行)", type=["xlsx", "csv"])
     file_d = st.file_uploader("2. 管家排名表 (含质检分)", type=["xlsx", "csv"])
     file_a = st.file_uploader("3. AMS跟进表 (含时长)", type=["xlsx", "csv"])
 
-# ================= 3. 数据处理 (核心修正：直接读取率) =================
+# ================= 3. 数据处理 (核心修正：直接透传原表率) =================
 def smart_read(file):
     try:
         if file.name.endswith('.csv'): return pd.read_csv(file)
@@ -39,46 +39,45 @@ def process_data(f_file, d_file, a_file):
         if raw_f is None or raw_d is None or raw_a is None: return None, None
 
         # --- A. 漏斗表处理 ---
-        # 1. 识别列名
+        # 1. 找列名
         store_col = next((c for c in raw_f.columns if '代理商' in str(c) or '门店' in str(c)), raw_f.columns[0])
         name_col = next((c for c in raw_f.columns if '管家' in str(c) or '顾问' in str(c)), raw_f.columns[1])
+        # 找核心数据列
         col_leads = '线上_有效线索数' if '线上_有效线索数' in raw_f.columns else '线索量'
         col_visits = '线上_到店数' if '线上_到店数' in raw_f.columns else '到店量'
-        
-        # 【关键修正】尝试直接找 Excel 里的“率”这一列
-        col_rate = next((c for c in raw_f.columns if '率' in str(c) and ('到店' in str(c) or '有效' in str(c))), None)
+        # 【关键】找 Excel 自带的率
+        col_excel_rate = next((c for c in raw_f.columns if '率' in str(c) and ('到店' in str(c) or '有效' in str(c))), None)
 
         # 重命名
         rename_dict = {store_col: '门店名称', name_col: '邀约专员/管家', col_leads: '线索量', col_visits: '到店量'}
-        if col_rate: rename_dict[col_rate] = '原始到店率' # 标记一下
+        if col_excel_rate: rename_dict[col_excel_rate] = 'Excel_Rate' # 标记为权威率
         
         df_f = raw_f.rename(columns=rename_dict)
         
-        # 2. 分离数据
-        # 提取门店行 (小计)
+        # 2. 区分 门店行(小计) 和 个人行
+        # 提取包含“小计”的行 -> 这就是门店排名的依据，完全不计算，直接拿
         df_store_data = df_f[df_f['邀约专员/管家'].astype(str).str.contains('小计', na=False)].copy()
-        # 提取顾问行 (非小计、非总计、非-)
+        
+        # 提取个人行
         df_advisor_data = df_f[~df_f['邀约专员/管家'].astype(str).str.contains('计|-', na=False)].copy()
 
-        # 3. 数值清洗
+        # 3. 清洗数据类型
         for df in [df_store_data, df_advisor_data]:
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
             
-            # 【核心逻辑】：优先用 Excel 里的率，如果没有才自己算
-            if '原始到店率' in df.columns:
-                # 尝试转数字
-                df['原始到店率'] = pd.to_numeric(df['原始到店率'], errors='coerce')
-                # Excel 里可能是 0.05 (小数) 也可能是 5 (百分比)，这里统一转为小数 (0.05)
-                # 假设：如果大部分数据 > 1，说明是百分比格式 (5.0)，除以100；否则默认是小数
-                if df['原始到店率'].mean() > 1.0:
-                     df['线索到店率'] = df['原始到店率'] / 100
+            # 【绝对核心】：直接使用 Excel 里的率
+            if 'Excel_Rate' in df.columns:
+                df['Excel_Rate'] = pd.to_numeric(df['Excel_Rate'], errors='coerce').fillna(0)
+                # 判断是否需要除以100 (如果原数据是 5.2 代表 5.2%，则不动；如果是 0.052，也不动，后续由 column_config 格式化)
+                # 通常 progress_column 需要 0-1 之间的小数
+                # 简单判断：如果最大值大于1，说明是百分数(如5.2)，除以100；否则是小数(0.05)
+                if df['Excel_Rate'].max() > 1.0:
+                    df['线索到店率'] = df['Excel_Rate'] / 100
                 else:
-                     df['线索到店率'] = df['原始到店率']
-                # 补0
-                df['线索到店率'] = df['线索到店率'].fillna(0)
+                    df['线索到店率'] = df['Excel_Rate']
             else:
-                # 迫不得已才自己算
+                # 只有万一没这一列，才自己算
                 df['线索到店率'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
 
         # --- B. DCC 表处理 ---
@@ -101,16 +100,19 @@ def process_data(f_file, d_file, a_file):
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        # --- E. 组合 ---
-        # 1. 顾问全量表
+        # --- E. 组合数据 ---
+        
+        # 1. 顾问全量表 (个人维度) -> Merge
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         full_advisors['通话时长'] = full_advisors['通话时长'].fillna(0)
 
-        # 2. 门店全量表
-        # 门店基础数据(含率)直接来自 df_store_data (Excel小计行，这是最准的)
-        # 门店质检分需要聚合
+        # 2. 门店全量表 (门店维度) -> 
+        # 关键：基础数据(线索、到店、率) 直接用 df_store_data (即Excel小计行)
+        # 只有质检分需要从个人表聚合 (因为小计行通常没质检分)
         store_scores = full_advisors.groupby('门店名称')[['质检总分', 'S_Time']].mean().reset_index()
+        
+        # 将聚合后的分数，拼接到 Excel 的小计行上
         full_stores = pd.merge(df_store_data, store_scores, on='门店名称', how='left')
         
         return full_advisors, full_stores
@@ -130,41 +132,43 @@ if file_f and file_d and file_a:
         col_header, col_filter = st.columns([3, 1])
         with col_header: st.title("Audi | DCC 效能质检看板")
         with col_filter:
+            # 门店列表优先从门店表取
             if not df_stores.empty: all_stores = sorted(list(df_stores['门店名称'].unique()))
             else: all_stores = sorted(list(df_advisors['门店名称'].unique()))
             store_options = ["全部"] + all_stores
             selected_store = st.selectbox("🏭 切换门店视图", store_options)
 
-        # --- 逻辑分支 ---
+        # --- 核心逻辑分支 ---
         if selected_store == "全部":
-            # === 全区模式 (读取 df_stores 即小计行) ===
+            # === 全区模式 (直接展示 df_stores 即小计行) ===
+            # 这里的数据就是 Excel 里的行，绝对准确
             current_df = df_stores
-            rank_title = "🏆 全区门店排名 (基于Excel小计)"
+            rank_title = "🏆 全区门店排名 (源自报表小计)"
             name_col_show = "门店名称"
             scatter_x_label = "门店平均明确到店分"
             
-            # KPI
+            # KPI (求和大盘)
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
-            if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads # 全区大盘率
+            if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = df_advisors['质检总分'].mean()
 
         else:
-            # === 单店模式 (读取 df_advisors) ===
+            # === 单店模式 (展示个人行) ===
             current_df = df_advisors[df_advisors['门店名称'] == selected_store]
             rank_title = f"👤 {selected_store} - 顾问排名"
             name_col_show = "邀约专员/管家"
             scatter_x_label = "个人明确到店得分"
             
-            # KPI (这里的率，如果Excel门店小计行里有，最好取那个；这里暂时用累加求和算)
+            # KPI
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = current_df['质检总分'].mean()
 
-        # --- 1. KPI ---
+        # --- 1. KPI 卡片 ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("总有效线索", f"{int(kpi_leads):,}")
         k2.metric("总实际到店", f"{int(kpi_visits):,}")
@@ -178,6 +182,7 @@ if file_f and file_d and file_a:
         
         with c_left:
             st.markdown(f"### {rank_title}")
+            # 这里的线索到店率直接来自 Excel 列，不做计算
             rank_df = current_df[[name_col_show, '线索到店率', '质检总分']].sort_values('线索到店率', ascending=False).head(15)
             
             st.dataframe(
@@ -188,7 +193,10 @@ if file_f and file_d and file_a:
                 column_config={
                     name_col_show: st.column_config.TextColumn("名称"),
                     "线索到店率": st.column_config.ProgressColumn(
-                        "线索到店率", format="%.1f%%", min_value=0, max_value=0.15
+                        "线索到店率",
+                        format="%.1f%%", # 格式化显示百分比
+                        min_value=0,
+                        max_value=0.2,   # 进度条长度比例
                     ),
                     "质检总分": st.column_config.NumberColumn(
                         "质检总分", format="%.1f"
@@ -199,24 +207,31 @@ if file_f and file_d and file_a:
         with c_right:
             st.markdown("### 💡 话术质量 vs 转化结果")
             plot_df = current_df.copy()
+            # 绘图用百分比值 (0-100)
             plot_df['转化率%'] = plot_df['线索到店率'] * 100
             
             fig = px.scatter(
-                plot_df, x="S_Time", y="转化率%", size="线索量", color="质检总分",
+                plot_df, 
+                x="S_Time", 
+                y="转化率%", 
+                size="线索量", 
+                color="质检总分",
                 hover_name=name_col_show,
                 labels={"S_Time": scatter_x_label, "转化率%": "线索到店率(%)"},
-                color_continuous_scale="Reds", height=400
+                color_continuous_scale="Reds",
+                height=400
             )
             if not plot_df.empty:
                 fig.add_vline(x=plot_df['S_Time'].mean(), line_dash="dash", line_color="gray")
                 fig.add_hline(y=kpi_rate * 100, line_dash="dash", line_color="gray")
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- 3. 诊断 ---
+        # --- 3. 深度诊断 ---
         st.markdown("---")
         with st.container():
             st.markdown("### 🕵️‍♀️ 管家深度诊断")
             
+            # 严格联动：只显示当前范围内的顾问
             if selected_store == "全部":
                 st.info("💡 请先在右上方选择具体【门店】，查看该门店下的顾问详细诊断。")
             else:
@@ -236,7 +251,7 @@ if file_f and file_d and file_a:
                         ))
                         fig_f.update_layout(showlegend=False, height=180, margin=dict(t=0,b=0,l=0,r=0))
                         st.plotly_chart(fig_f, use_container_width=True)
-                        st.metric("线索到店率", f"{p['线索到店率']:.1%}")
+                        st.metric("线索到店率", f"{p['线索到店率']:.1%}") # 这里的率也是直接取自Excel
                         st.caption(f"平均通话时长: {p['通话时长']:.1f} 秒")
 
                     with d2:
@@ -267,6 +282,5 @@ if file_f and file_d and file_a:
                             if not issues: st.success("各项指标表现优秀！")
                 else:
                     st.warning("该门店下暂无顾问数据。")
-
 else:
-    st.info("👈 请在左侧上传文件以开始分析")
+    st.info("👈 请在左侧上传三个文件")
