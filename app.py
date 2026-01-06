@@ -249,8 +249,16 @@ def process_data(path_f, path_d, path_a):
         cols_to_fill_zero = ['线索量', '到店量', '通话时长'] + all_ams_calc_cols
         full_advisors[cols_to_fill_zero] = full_advisors[cols_to_fill_zero].fillna(0)
 
+        # 【核心修正】：在计算门店平均分时，显式包含所有细项分数
+        # 'mean' 会自动忽略 NaN，这正是您要的（有分的人的总分 / 有分的人数）
         agg_dict = {
-            '质检总分': 'mean', 'S_Time': 'mean', 'S_60s': 'mean',
+            '质检总分': 'mean', 
+            'S_Time': 'mean', 
+            'S_60s': 'mean',
+            'S_Needs': 'mean', 
+            'S_Car': 'mean', 
+            'S_Policy': 'mean', 
+            'S_Wechat': 'mean',
             'conn_num': 'sum', 'conn_denom': 'sum',
             'timely_num': 'sum', 'timely_denom': 'sum',
             'call2_num': 'sum', 'call2_denom': 'sum',
@@ -448,10 +456,7 @@ if has_data:
                         with st.container():
                             if has_score:
                                 st.error("🤖 诊断建议")
-                                
-                                # --- 核心逻辑开始 ---
                                 val_60s = 0 if pd.isna(p['S_60s']) else p['S_60s']
-                                
                                 other_kpis = {
                                     "明确到店": (p['S_Time'], "建议使用二选一法锁定时间。"),
                                     "添加微信": (p['S_Wechat'], "建议以发定位为由加微。"),
@@ -459,8 +464,6 @@ if has_data:
                                     "车型信息": (p['S_Car'], "需提升产品DCC话术熟练度。"),
                                     "政策相关": (p['S_Policy'], "需准确传达促销政策利益点。")
                                 }
-                                
-                                # 整理其他指标
                                 cleaned_others = {}
                                 for k, (v, advice) in other_kpis.items():
                                     cleaned_others[k] = (0 if pd.isna(v) else v, advice)
@@ -468,7 +471,6 @@ if has_data:
                                 issues_list = []
                                 is_failing = False
                                 
-                                # 1. 检查不及格项
                                 if val_60s < 60:
                                     issues_list.append(f"🟠 **60秒占比 (得分{val_60s:.1f})**\n开场白需抛出利益点。")
                                     is_failing = True
@@ -478,23 +480,13 @@ if has_data:
                                         issues_list.append(f"🔴 **{k} (得分{score:.1f})**\n{advice}")
                                         is_failing = True
                                         
-                                # 2. 诊断输出
                                 if is_failing:
-                                    for item in issues_list:
-                                        st.markdown(item)
+                                    for item in issues_list: st.markdown(item)
                                     st.warning("⚠️ 存在明显短板，请重点辅导。")
                                 else:
-                                    # 3. 区分优秀与合格
-                                    # 逻辑：如果没有failing，说明 60s>=60 且 其他>=80
-                                    # 现在检查是否所有其他指标都 >= 85
                                     all_above_85 = all(score >= 85 for score, _ in cleaned_others.values())
-                                    
-                                    if all_above_85:
-                                        st.success("🌟 **各项指标表现优秀！**")
-                                    else:
-                                        st.info("✅ **各项指标合格**\n目前表现稳定，但部分指标未达到85分卓越标准，仍有提升空间。")
-                                # --- 核心逻辑结束 ---
-                                
+                                    if all_above_85: st.success("🌟 **各项指标表现优秀！**")
+                                    else: st.info("✅ **各项指标合格**\n目前表现稳定，但部分指标未达到85分卓越标准，仍有提升空间。")
                             else: st.info("暂无数据，无法生成诊断建议。")
                 else: st.warning("该门店下暂无数据。")
 else:
