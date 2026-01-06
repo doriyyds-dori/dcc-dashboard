@@ -9,30 +9,21 @@ st.set_page_config(page_title="Audi DCC 效能质检看板", layout="wide", page
 
 st.markdown("""
 <style>
-    /* 调整顶部容器样式，让筛选器和标题对齐 */
-    .top-container {
-        display: flex; 
-        align-items: center; 
-        justify-content: space-between;
-        padding-bottom: 20px;
-        border-bottom: 2px solid #f0f0f0;
-    }
+    .top-container {display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 2px solid #f0f0f0;}
     .metric-card {background-color: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);}
-    /* 奥迪红进度条 */
     .stProgress > div > div > div > div { background-color: #bb0a30; }
-    /* 调整下拉框样式使其更紧凑 */
     div[data-testid="stSelectbox"] {min-width: 200px;}
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 侧边栏：仅保留上传功能 =================
+# ================= 2. 侧边栏 =================
 with st.sidebar:
     st.header("📂 数据上传")
     file_f = st.file_uploader("1. 漏斗指标表 (含小计行)", type=["xlsx", "csv"])
     file_d = st.file_uploader("2. 管家排名表 (含质检分)", type=["xlsx", "csv"])
     file_a = st.file_uploader("3. AMS跟进表 (含时长)", type=["xlsx", "csv"])
 
-# ================= 3. 数据清洗 (精准提取小计行) =================
+# ================= 3. 数据处理 (核心修正：直接读取率) =================
 def smart_read(file):
     try:
         if file.name.endswith('.csv'): return pd.read_csv(file)
@@ -47,31 +38,48 @@ def process_data(f_file, d_file, a_file):
 
         if raw_f is None or raw_d is None or raw_a is None: return None, None
 
-        # --- A. 漏斗表处理 (分离 门店小计 vs 个人) ---
-        # 1. 找列名
+        # --- A. 漏斗表处理 ---
+        # 1. 识别列名
         store_col = next((c for c in raw_f.columns if '代理商' in str(c) or '门店' in str(c)), raw_f.columns[0])
         name_col = next((c for c in raw_f.columns if '管家' in str(c) or '顾问' in str(c)), raw_f.columns[1])
-        
-        # 2. 找数据列 (确保使用“有效线索”作为分母)
-        # 根据您提供的片段，列名应该是 '线上_有效线索数' 和 '线上_到店数'
         col_leads = '线上_有效线索数' if '线上_有效线索数' in raw_f.columns else '线索量'
         col_visits = '线上_到店数' if '线上_到店数' in raw_f.columns else '到店量'
+        
+        # 【关键修正】尝试直接找 Excel 里的“率”这一列
+        col_rate = next((c for c in raw_f.columns if '率' in str(c) and ('到店' in str(c) or '有效' in str(c))), None)
 
-        df_f = raw_f.rename(columns={store_col: '门店名称', name_col: '邀约专员/管家', col_leads: '线索量', col_visits: '到店量'})
+        # 重命名
+        rename_dict = {store_col: '门店名称', name_col: '邀约专员/管家', col_leads: '线索量', col_visits: '到店量'}
+        if col_rate: rename_dict[col_rate] = '原始到店率' # 标记一下
         
-        # 3. 提取【门店级数据】 (即：管家列写着 "小计" 的行)
-        # 这一步解决了数据不对的问题：直接读取Excel算好的小计，而不是我们自己加
+        df_f = raw_f.rename(columns=rename_dict)
+        
+        # 2. 分离数据
+        # 提取门店行 (小计)
         df_store_data = df_f[df_f['邀约专员/管家'].astype(str).str.contains('小计', na=False)].copy()
-        
-        # 4. 提取【顾问级数据】 (排除 总计、小计、-)
+        # 提取顾问行 (非小计、非总计、非-)
         df_advisor_data = df_f[~df_f['邀约专员/管家'].astype(str).str.contains('计|-', na=False)].copy()
 
-        # 数值转换
+        # 3. 数值清洗
         for df in [df_store_data, df_advisor_data]:
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
-            # 重新计算一次率，确保精度
-            df['线索到店率'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
+            
+            # 【核心逻辑】：优先用 Excel 里的率，如果没有才自己算
+            if '原始到店率' in df.columns:
+                # 尝试转数字
+                df['原始到店率'] = pd.to_numeric(df['原始到店率'], errors='coerce')
+                # Excel 里可能是 0.05 (小数) 也可能是 5 (百分比)，这里统一转为小数 (0.05)
+                # 假设：如果大部分数据 > 1，说明是百分比格式 (5.0)，除以100；否则默认是小数
+                if df['原始到店率'].mean() > 1.0:
+                     df['线索到店率'] = df['原始到店率'] / 100
+                else:
+                     df['线索到店率'] = df['原始到店率']
+                # 补0
+                df['线索到店率'] = df['线索到店率'].fillna(0)
+            else:
+                # 迫不得已才自己算
+                df['线索到店率'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
 
         # --- B. DCC 表处理 ---
         wechat_col = '添加微信.1' if '添加微信.1' in raw_d.columns else '添加微信'
@@ -93,18 +101,16 @@ def process_data(f_file, d_file, a_file):
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        # --- E. 组合数据 ---
-        
-        # 1. 顾问全量表 (用于单店视图 & 诊断)
-        full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner') # 只保留有质检分的人
-        full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left') # 时长可以为空
+        # --- E. 组合 ---
+        # 1. 顾问全量表
+        full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner')
+        full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         full_advisors['通话时长'] = full_advisors['通话时长'].fillna(0)
 
-        # 2. 门店全量表 (用于全区视图)
-        # 门店的基础数据(线索/到店)来自 df_store_data (Excel小计行)
-        # 门店的质检分需要聚合算出
+        # 2. 门店全量表
+        # 门店基础数据(含率)直接来自 df_store_data (Excel小计行，这是最准的)
+        # 门店质检分需要聚合
         store_scores = full_advisors.groupby('门店名称')[['质检总分', 'S_Time']].mean().reset_index()
-        
         full_stores = pd.merge(df_store_data, store_scores, on='门店名称', how='left')
         
         return full_advisors, full_stores
@@ -120,56 +126,45 @@ if file_f and file_d and file_a:
     
     if df_advisors is not None:
         
-        # --- 顶部布局：标题 + 筛选器 并排 ---
+        # --- 顶部布局 ---
         col_header, col_filter = st.columns([3, 1])
-        
-        with col_header:
-            st.title("Audi | DCC 效能质检看板")
-            
+        with col_header: st.title("Audi | DCC 效能质检看板")
         with col_filter:
-            # 门店列表
-            if not df_stores.empty:
-                all_stores = sorted(list(df_stores['门店名称'].unique()))
-            else:
-                all_stores = sorted(list(df_advisors['门店名称'].unique()))
-                
+            if not df_stores.empty: all_stores = sorted(list(df_stores['门店名称'].unique()))
+            else: all_stores = sorted(list(df_advisors['门店名称'].unique()))
             store_options = ["全部"] + all_stores
             selected_store = st.selectbox("🏭 切换门店视图", store_options)
 
-        # --- 核心逻辑分支 ---
+        # --- 逻辑分支 ---
         if selected_store == "全部":
-            # === 模式 A：全区门店 PK (读取小计行) ===
+            # === 全区模式 (读取 df_stores 即小计行) ===
             current_df = df_stores
-            
-            # 显示配置
-            rank_title = "🏆 全区门店排名 (按线索到店率)"
+            rank_title = "🏆 全区门店排名 (基于Excel小计)"
             name_col_show = "门店名称"
             scatter_x_label = "门店平均明确到店分"
             
-            # KPI 计算 (基于门店小计行求和)
+            # KPI
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
-            kpi_score = df_advisors['质检总分'].mean() # 分数还是看全员平均
-            
+            if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads # 全区大盘率
+            else: kpi_rate = 0
+            kpi_score = df_advisors['质检总分'].mean()
+
         else:
-            # === 模式 B：单店顾问 PK (读取个人行) ===
+            # === 单店模式 (读取 df_advisors) ===
             current_df = df_advisors[df_advisors['门店名称'] == selected_store]
-            
-            # 显示配置
             rank_title = f"👤 {selected_store} - 顾问排名"
             name_col_show = "邀约专员/管家"
             scatter_x_label = "个人明确到店得分"
             
-            # KPI 计算
+            # KPI (这里的率，如果Excel门店小计行里有，最好取那个；这里暂时用累加求和算)
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
+            if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
+            else: kpi_rate = 0
             kpi_score = current_df['质检总分'].mean()
 
-        # 计算总转化率
-        if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
-        else: kpi_rate = 0
-
-        # --- 1. KPI 卡片 ---
+        # --- 1. KPI ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("总有效线索", f"{int(kpi_leads):,}")
         k2.metric("总实际到店", f"{int(kpi_visits):,}")
@@ -183,7 +178,6 @@ if file_f and file_d and file_a:
         
         with c_left:
             st.markdown(f"### {rank_title}")
-            # 排序
             rank_df = current_df[[name_col_show, '线索到店率', '质检总分']].sort_values('线索到店率', ascending=False).head(15)
             
             st.dataframe(
@@ -194,10 +188,7 @@ if file_f and file_d and file_a:
                 column_config={
                     name_col_show: st.column_config.TextColumn("名称"),
                     "线索到店率": st.column_config.ProgressColumn(
-                        "线索到店率",
-                        format="%.1f%%",
-                        min_value=0,
-                        max_value=0.2, # 这里的最大值决定进度条长度，可根据实际调整
+                        "线索到店率", format="%.1f%%", min_value=0, max_value=0.15
                     ),
                     "质检总分": st.column_config.NumberColumn(
                         "质检总分", format="%.1f"
@@ -211,47 +202,30 @@ if file_f and file_d and file_a:
             plot_df['转化率%'] = plot_df['线索到店率'] * 100
             
             fig = px.scatter(
-                plot_df, 
-                x="S_Time", # 明确到店得分
-                y="转化率%", 
-                size="线索量", 
-                color="质检总分",
+                plot_df, x="S_Time", y="转化率%", size="线索量", color="质检总分",
                 hover_name=name_col_show,
                 labels={"S_Time": scatter_x_label, "转化率%": "线索到店率(%)"},
-                color_continuous_scale="Reds",
-                height=400
+                color_continuous_scale="Reds", height=400
             )
-            # 辅助线
             if not plot_df.empty:
                 fig.add_vline(x=plot_df['S_Time'].mean(), line_dash="dash", line_color="gray")
                 fig.add_hline(y=kpi_rate * 100, line_dash="dash", line_color="gray")
-                
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- 3. 深度诊断 (严格联动) ---
+        # --- 3. 诊断 ---
         st.markdown("---")
         with st.container():
             st.markdown("### 🕵️‍♀️ 管家深度诊断")
             
-            # 准备下拉框名单
             if selected_store == "全部":
-                # 全区模式：允许搜全区所有人，但最好按门店分类显示太乱，所以我们可以提示先选门店
-                st.info("💡 请先在右上方选择具体【门店】，即可查看该门店下的顾问详细诊断。")
-                # 或者如果你想在全区模式下也能搜人：
-                # diag_list = sorted(df_advisors['邀约专员/管家'].unique())
+                st.info("💡 请先在右上方选择具体【门店】，查看该门店下的顾问详细诊断。")
             else:
-                # 单店模式：只显示该店的人
                 diag_list = sorted(current_df['邀约专员/管家'].unique())
-                
                 if len(diag_list) > 0:
                     selected_person = st.selectbox("🔍 选择/搜索该店顾问：", diag_list)
-                    
-                    # 锁定数据
                     p = df_advisors[df_advisors['邀约专员/管家'] == selected_person].iloc[0]
                     
-                    # 渲染三栏
                     d1, d2, d3 = st.columns([1, 1, 1.2])
-                    
                     with d1:
                         st.caption("转化漏斗 (RESULT)")
                         fig_f = go.Figure(go.Funnel(
@@ -268,11 +242,8 @@ if file_f and file_d and file_a:
                     with d2:
                         st.caption("质检得分详情 (QUALITY)")
                         metrics = {
-                            "明确到店时间": p['S_Time'],
-                            "60秒通话占比": p['S_60s'],
-                            "车型信息介绍": p['S_Car'],
-                            "政策相关话术": p['S_Policy'],
-                            "添加微信": p['S_Wechat']
+                            "明确到店时间": p['S_Time'], "60秒通话占比": p['S_60s'],
+                            "车型信息介绍": p['S_Car'], "政策相关话术": p['S_Policy'], "添加微信": p['S_Wechat']
                         }
                         for k, v in metrics.items():
                             c_a, c_b = st.columns([3, 1])
@@ -288,15 +259,14 @@ if file_f and file_d and file_a:
                                 st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。")
                                 issues.append(1)
                             if p['S_60s'] < 60:
-                                st.markdown(f"🟠 **60秒占比 (得分{p['S_60s']:.1f})**\n开场白缺乏吸引力，需抛出利益点。")
+                                st.markdown(f"🟠 **60秒占比 (得分{p['S_60s']:.1f})**\n开场白需抛出利益点。")
                                 issues.append(1)
                             if p['S_Wechat'] < 80:
-                                st.markdown(f"🟠 **添加微信 (得分{p['S_Wechat']:.1f})**\n建议以发定位为由尝试加微。")
+                                st.markdown(f"🟠 **添加微信 (得分{p['S_Wechat']:.1f})**\n建议以发定位为由加微。")
                                 issues.append(1)
-                            if not issues:
-                                st.success("各项指标表现优秀！")
+                            if not issues: st.success("各项指标表现优秀！")
                 else:
-                    st.warning("该门店下暂无匹配的顾问数据。")
+                    st.warning("该门店下暂无顾问数据。")
 
 else:
     st.info("👈 请在左侧上传文件以开始分析")
