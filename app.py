@@ -44,7 +44,9 @@ if file_funnel and file_dcc and file_ams:
             
             with c1:
                 st.markdown("**1. 基础信息**")
-                col_name_d = st.selectbox("顾问姓名列", df_d.columns, index=df_d.columns.get_loc(find_col(df_d, ['顾问','姓名'])))
+                col_name_f = st.selectbox("【漏斗表】姓名列", df_f.columns, index=df_f.columns.get_loc(find_col(df_f, ['顾问','姓名'])), key='nf')
+                col_name_d = st.selectbox("【管家表】姓名列", df_d.columns, index=df_d.columns.get_loc(find_col(df_d, ['顾问','姓名'])), key='nd')
+                col_name_a = st.selectbox("【AMS表】姓名列", df_a.columns, index=df_a.columns.get_loc(find_col(df_a, ['顾问','姓名'])), key='na')
                 col_score_total = st.selectbox("质检总分列", df_d.columns, index=df_d.columns.get_loc(find_col(df_d, ['质检','总分'])))
                 
             with c2:
@@ -62,117 +64,30 @@ if file_funnel and file_dcc and file_ams:
                 col_time = st.selectbox("【明确到店时间】列", df_d.columns, index=df_d.columns.get_loc(find_col(df_d, ['明确','时间'])))
 
             # 隐式配置其他两表的关键列 (简化显示)
-            col_name_f = find_col(df_f, ['顾问','姓名'])
             col_leads = find_col(df_f, ['线索','总数'])
             col_visit = find_col(df_f, ['到店','进店'])
-            col_name_a = find_col(df_a, ['顾问','姓名'])
             col_duration = find_col(df_a, ['时长','通话'])
 
-        # --- 数据融合 ---
+        # --- 数据清洗与融合 (修复 Bug 的核心) ---
+        
+        # 1. 统一列名为 Name
         df_f = df_f.rename(columns={col_name_f: 'Name'})
         df_d = df_d.rename(columns={col_name_d: 'Name'})
         df_a = df_a.rename(columns={col_name_a: 'Name'})
         
+        # 2. 强制转为字符串并去除前后空格 (解决匹配不到的问题)
+        df_f['Name'] = df_f['Name'].astype(str).str.strip()
+        df_d['Name'] = df_d['Name'].astype(str).str.strip()
+        df_a['Name'] = df_a['Name'].astype(str).str.strip()
+        
+        # 3. 合并
         merged = pd.merge(df_f, df_d, on='Name', how='inner')
         merged = pd.merge(merged, df_a, on='Name', how='inner')
-        merged['转化率'] = (merged[col_visit] / merged[col_leads] * 100).fillna(0).round(2)
         
-        # ================= 4. 看板展示 =================
-
-        # A. 顶部 KPI
-        st.markdown("### 1️⃣ 全区效能概览")
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("总线索量", int(merged[col_leads].sum()))
-        k2.metric("平均转化率", f"{merged['转化率'].mean():.2f}%")
-        k3.metric("平均质检总分", f"{merged[col_score_total].mean():.1f}")
-        # 算出60秒达标率 (假设 > 0 算有)
-        pass_60s = (merged[col_60s] >= 60).sum() / len(merged) * 100
-        k4.metric("60秒通话达标率", f"{pass_60s:.1f}%")
-
-        st.markdown("---")
-
-        # B. 顾问深度诊断 (核心升级：六维雷达图)
-        st.markdown("### 🕵️‍♀️ 顾问六维能力诊断")
-        
-        col_list, col_radar = st.columns([1, 2])
-        
-        with col_list:
-            st.subheader("顾问列表")
-            selected_advisor = st.radio("点击选择顾问查看详情:", merged['Name'].unique())
-            
-        with col_radar:
-            p = merged[merged['Name'] == selected_advisor].iloc[0]
-            
-            # 准备雷达图数据
-            categories = ['60秒占比', '用车需求', '车型信息', '政策相关', '添加微信', '明确到店']
-            values = [p[col_60s], p[col_needs], p[col_car], p[col_policy], p[col_wechat], p[col_time]]
-            
-            # 绘制雷达图
-            fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(
-                r=values,
-                theta=categories,
-                fill='toself',
-                name=selected_advisor,
-                line_color='#bb0a30'
-            ))
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=False,
-                title=f"{selected_advisor} 的质检能力模型"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # C. 详细得分与 AI 建议
-        st.markdown("---")
-        st.subheader(f"📝 {selected_advisor} 的智能改进方案")
-        
-        c_score, c_advice = st.columns([1, 1])
-        
-        with c_score:
-            st.caption("各项指标具体得分")
-            col_metrics = {
-                '60秒通话占比 (基石)': p[col_60s],
-                '用车需求 (挖掘)': p[col_needs],
-                '车型信息 (专业)': p[col_car],
-                '政策相关 (专业)': p[col_policy],
-                '添加微信 (留存)': p[col_wechat],
-                '明确到店 (结果)': p[col_time]
-            }
-            
-            for k, v in col_metrics.items():
-                col_a, col_b = st.columns([3, 1])
-                col_a.progress(v/100)
-                col_b.write(f"{v} 分")
-                st.caption(k)
-
-        with c_advice:
-            st.caption("AI 诊断建议")
-            
-            # 针对 6 个维度的规则引擎
-            issues = []
-            
-            if p[col_time] < 60:
-                st.error(f"🔴 **【致命短板】明确到店 (得分{p[col_time]})**：未有效锁定到店时间，流失风险极大。建议使用“二选一”法提问。")
-                issues.append(1)
-            
-            if p[col_60s] < 60:
-                st.warning(f"🟠 **【基石不稳】60秒占比 (得分{p[col_60s]})**：客户挂断过快，需优化开场白，增加吸引力。")
-                issues.append(1)
-                
-            if p[col_wechat] < 60:
-                st.warning(f"🟠 **【私域缺失】添加微信 (得分{p[col_wechat]})**：未尝试加微，后续跟进困难。建议以“发定位/配置表”为由加微。")
-                issues.append(1)
-            
-            if p[col_needs] < 60:
-                st.info(f"🔵 **用车需求 (得分{p[col_needs]})**：需求挖掘不深，建议多用开放式提问（如：您主要在哪里用车？）。")
-                issues.append(1)
-                
-            if not issues:
-                st.success("✅ 该顾问六维能力均衡，表现优秀！")
-
-    except Exception as e:
-        st.error(f"发生错误，请检查列名是否配置正确。错误信息: {e}")
-
-else:
-    st.info("👈 请在左侧上传全部 3 个文件以生成看板")
+        # 4. 安全检查：如果合并后没数据，停止运行并提示
+        if len(merged) == 0:
+            st.error("⚠️ **数据合并结果为空！**")
+            st.markdown("""
+            **可能原因：**
+            1. 三个表格里的 **顾问姓名** 写法不一致（例如：“王小明” vs “王 小明”）。
+            2. 您在上方配置栏
