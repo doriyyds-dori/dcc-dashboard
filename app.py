@@ -189,7 +189,7 @@ if has_data:
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
-            rank_title = f"👤 {selected_store} - 顾问排名"
+            rank_title = f"👤 {selected_store} - DCC/管家排名"
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
@@ -267,7 +267,7 @@ if has_data:
         with c_proc_2:
             # 【修改点】标题改了
             st.markdown("#### 🔗 归因分析：过程指标 vs 线索首邀到店率")
-            st.info("💡 **分析逻辑：** 观察哪个动作与成交相关性最强。")
+            st.info("💡 **分析逻辑：** 监控外呼及时性与邀约到店率相关性。")
             
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             
@@ -375,13 +375,13 @@ if has_data:
 
         st.markdown("---")
         with st.container():
-            st.markdown("### 🕵️‍♀️ 管家深度诊断")
+            st.markdown("### 🕵️‍♀️ 邀约专员/管家深度诊断")
             if selected_store == "全部":
-                st.info("💡 请先在右上方选择具体【门店】，查看该门店下的顾问详细诊断。")
+                st.info("💡 请先在右上方选择具体【门店】，查看该门店下的DCC/管家详细诊断。")
             else:
                 diag_list = sorted(current_df['邀约专员/管家'].unique())
                 if len(diag_list) > 0:
-                    selected_person = st.selectbox("🔍 选择/搜索该店邀约专员/管家：", diag_list)
+                    selected_person = st.selectbox("🔍 选择该店邀约专员/管家：", diag_list)
                     p = df_advisors[df_advisors['邀约专员/管家'] == selected_person].iloc[0]
                     
                     d1, d2, d3 = st.columns([1, 1, 1.2])
@@ -433,3 +433,4 @@ if has_data:
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
+
