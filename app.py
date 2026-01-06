@@ -1,223 +1,230 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 
 # ================= 1. 页面基础设置 =================
-st.set_page_config(page_title="Audi DCC 质检六维看板", layout="wide", page_icon="🏎️")
+st.set_page_config(page_title="Audi DCC 质检实战看板", layout="wide", page_icon="🏎️")
 
-# CSS 样式注入
 st.markdown("""
 <style>
-    .metric-container {background-color: #f0f2f6; padding: 10px; border-radius: 5px; border-left: 5px solid #bb0a30;}
-    .big-font {font-size: 20px !important; font-weight: bold;}
-    h3 {border-bottom: 2px solid #e6e6e6; padding-bottom: 10px;}
+    .metric-card {background-color: #f9f9f9; border-left: 5px solid #bb0a30; padding: 15px; border-radius: 5px;}
+    .stProgress > div > div > div > div { background-color: #bb0a30; }
+    div[data-testid="stFileUploader"] {margin-bottom: 10px;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏎️ Audi DCC | 质检六维效能看板")
+st.title("🏎️ Audi DCC | 效能质检实战看板")
+st.caption("请在左侧上传您的三个原始报表文件（支持 Excel/CSV）")
 
-# ================= 2. 侧边栏：三表上传 =================
-with st.sidebar:
-    st.header("📂 数据源配置")
-    st.info("请确保上传了以下三个文件")
-    file_funnel = st.file_uploader("1. 漏斗指标表 (含线索/到店)", type=["xlsx", "csv"])
-    file_dcc = st.file_uploader("2. 管家排名表 (含6大质检得分)", type=["xlsx", "csv"])
-    file_ams = st.file_uploader("3. AMS跟进表 (含通话时长)", type=["xlsx", "csv"])
+# ================= 2. 数据读取与清洗函数 =================
 
-# 辅助函数：查找列名
-def find_col(df, keywords):
-    for col in df.columns:
-        for k in keywords:
-            if k in col: return col
-    # 如果找不到，默认返回第一列，防止报错
-    return df.columns[0]
-
-# ================= 3. 主程序逻辑 =================
-if file_funnel and file_dcc and file_ams:
+def load_file(uploaded_file):
+    """智能读取 Excel 或 CSV"""
     try:
-        # 读取数据
-        df_f = pd.read_csv(file_funnel) if file_funnel.name.endswith('csv') else pd.read_excel(file_funnel)
-        df_d = pd.read_csv(file_dcc) if file_dcc.name.endswith('csv') else pd.read_excel(file_dcc)
-        df_a = pd.read_csv(file_ams) if file_ams.name.endswith('csv') else pd.read_excel(file_ams)
+        if uploaded_file.name.lower().endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        else:
+            return pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.error(f"文件 {uploaded_file.name} 读取失败: {e}")
+        return None
 
-        # --- ⚙️ 关键列名配置 ---
-        with st.expander("🔧 点击展开：配置 6 大关键得分列名", expanded=True):
-            st.info("请确保下方选中的列名与您 Excel 中的表头一一对应")
-            c1, c2, c3 = st.columns(3)
+def clean_data(df_funnel, df_dcc, df_ams):
+    """
+    针对您的三个特定文件进行自动清洗和合并
+    """
+    # 1. 规范化列名 (基于您提供的文件结构)
+    # 漏斗表: '管家' -> Name, '线上_有效线索数' -> Leads, '线上_到店数' -> Visits
+    df_funnel = df_funnel.rename(columns={
+        '管家': 'Name', 
+        '线上_有效线索数': 'Leads', 
+        '线上_到店数': 'Visits'
+    })
+    
+    # DCC表: '顾问名称' -> Name, 以及6大得分
+    df_dcc = df_dcc.rename(columns={
+        '顾问名称': 'Name',
+        '质检总分': 'Score',
+        '60秒通话': 'S_60s',
+        '用车需求': 'S_Needs',
+        '车型信息': 'S_Car',
+        '政策相关': 'S_Policy',
+        '添加微信': 'S_Wechat',
+        '明确到店时间': 'S_Time'
+    })
+    
+    # AMS表: '管家姓名' -> Name, 'DCC平均通话时长' -> Duration
+    df_ams = df_ams.rename(columns={
+        '管家姓名': 'Name',
+        'DCC平均通话时长': 'Duration'
+    })
+
+    # 2. 清理姓名列 (去空格，防止匹配不上)
+    for df in [df_funnel, df_dcc, df_ams]:
+        if 'Name' in df.columns:
+            df['Name'] = df['Name'].astype(str).str.strip()
+        else:
+            st.error("无法在表中找到‘顾问姓名’列，请检查表头是否包含 '管家' 或 '顾问名称'")
+            return None
+
+    # 3. 合并数据 (Inner Join，只保留三张表都有的人)
+    merged = pd.merge(df_dcc, df_funnel[['Name', 'Leads', 'Visits']], on='Name', how='inner')
+    merged = pd.merge(merged, df_ams[['Name', 'Duration']], on='Name', how='inner')
+
+    # 4. 数值类型转换 (防止Excel里有非数字字符)
+    cols = ['Score', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time', 'Leads', 'Visits', 'Duration']
+    for c in cols:
+        merged[c] = pd.to_numeric(merged[c], errors='coerce').fillna(0)
+
+    # 5. 计算转化率
+    merged['转化率'] = (merged['Visits'] / merged['Leads'] * 100).fillna(0).round(2)
+    
+    return merged
+
+# ================= 3. 侧边栏：上传入口 =================
+with st.sidebar:
+    st.header("📂 数据上传区")
+    
+    file_f = st.file_uploader("1. 上传【漏斗指标表】(Funnel)", type=["xlsx", "csv"])
+    file_d = st.file_uploader("2. 上传【管家排名表】(DCC)", type=["xlsx", "csv"])
+    file_a = st.file_uploader("3. 上传【AMS跟进表】(AMS)", type=["xlsx", "csv"])
+    
+    st.markdown("---")
+    st.info("💡 提示：上传顺序不限，只要三个文件齐了就会自动分析。")
+
+# ================= 4. 主逻辑 =================
+
+if file_f and file_d and file_a:
+    # 1. 读取
+    raw_f = load_file(file_f)
+    raw_d = load_file(file_d)
+    raw_a = load_file(file_a)
+
+    if raw_f is not None and raw_d is not None and raw_a is not None:
+        # 2. 清洗与合并
+        df = clean_data(raw_f, raw_d, raw_a)
+        
+        if df is not None and not df.empty:
+            st.success(f"✅ 数据融合成功！共分析 {len(df)} 位顾问。")
             
-            with c1:
-                st.markdown("**1. 基础信息**")
-                # 自动查找默认值
-                def_name_d = find_col(df_d, ['顾问','姓名'])
-                def_score = find_col(df_d, ['质检','总分'])
-                
-                col_name_d = st.selectbox("顾问姓名列", df_d.columns, index=df_d.columns.get_loc(def_name_d))
-                col_score_total = st.selectbox("质检总分列", df_d.columns, index=df_d.columns.get_loc(def_score))
-                
-            with c2:
-                st.markdown("**2. 流程与基石指标**")
-                def_60s = find_col(df_d, ['60秒','时长占比'])
-                def_needs = find_col(df_d, ['需求','用车'])
-                def_wechat = find_col(df_d, ['微信','加微'])
+            # --- A. 全局 KPI ---
+            st.markdown("### 1️⃣ 全区效能概览")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("总线索量", int(df['Leads'].sum()))
+            k2.metric("平均转化率", f"{df['转化率'].mean():.2f}%")
+            k3.metric("平均质检分", f"{df['Score'].mean():.1f}")
+            # 计算60秒达标率 (>0分即视为有动作，或者您可以定>=60)
+            pass_rate = (df['S_60s'] >= 60).mean() * 100
+            k4.metric("60秒通话达标率 (≥60分)", f"{pass_rate:.1f}%")
 
-                col_60s = st.selectbox("【60秒通话占比】列", df_d.columns, index=df_d.columns.get_loc(def_60s))
-                col_needs = st.selectbox("【用车需求】列", df_d.columns, index=df_d.columns.get_loc(def_needs))
-                col_wechat = st.selectbox("【添加微信】列", df_d.columns, index=df_d.columns.get_loc(def_wechat))
+            st.markdown("---")
 
-            with c3:
-                st.markdown("**3. 专业与结果指标**")
-                def_car = find_col(df_d, ['车型','信息'])
-                def_policy = find_col(df_d, ['政策','话术'])
-                def_time = find_col(df_d, ['明确','时间'])
-
-                col_car = st.selectbox("【车型信息】列", df_d.columns, index=df_d.columns.get_loc(def_car))
-                col_policy = st.selectbox("【政策相关】列", df_d.columns, index=df_d.columns.get_loc(def_policy))
-                col_time = st.selectbox("【明确到店时间】列", df_d.columns, index=df_d.columns.get_loc(def_time))
-
-            # 隐式配置其他两表的关键列
-            col_name_f = find_col(df_f, ['顾问','姓名'])
-            col_leads = find_col(df_f, ['线索','总数'])
-            col_visit = find_col(df_f, ['到店','进店'])
-            col_name_a = find_col(df_a, ['顾问','姓名'])
-
-        # --- 数据融合 ---
-        # 重命名为 Name 以便合并
-        df_f_renamed = df_f.rename(columns={col_name_f: 'Name'})
-        df_d_renamed = df_d.rename(columns={col_name_d: 'Name'})
-        df_a_renamed = df_a.rename(columns={col_name_a: 'Name'})
-        
-        # 内连接合并
-        merged = pd.merge(df_f_renamed, df_d_renamed, on='Name', how='inner')
-        merged = pd.merge(merged, df_a_renamed, on='Name', how='inner')
-        
-        # 计算转化率
-        merged['转化率'] = (merged[col_visit] / merged[col_leads] * 100).fillna(0).round(2)
-        
-        # ================= 4. 看板展示 =================
-
-        # A. 顶部 KPI
-        st.markdown("### 1️⃣ 全区效能概览")
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("总线索量", int(merged[col_leads].sum()))
-        k2.metric("平均转化率", f"{merged['转化率'].mean():.2f}%")
-        k3.metric("平均质检总分", f"{merged[col_score_total].mean():.1f}")
-        
-        # 算出60秒达标率
-        pass_60s = (merged[col_60s] >= 60).sum() / len(merged) * 100
-        k4.metric("60秒通话达标率", f"{pass_60s:.1f}%")
-
-        st.markdown("---")
-
-        # B. 顾问深度诊断 (六维雷达图)
-        st.markdown("### 🕵️‍♀️ 顾问六维能力诊断")
-        
-        col_list, col_radar = st.columns([1, 2])
-        
-        with col_list:
-            st.subheader("顾问列表")
-            all_advisors = merged['Name'].unique()
-            if len(all_advisors) > 0:
-                selected_advisor = st.radio("点击选择顾问查看详情:", all_advisors)
-            else:
-                st.warning("未找到顾问数据")
-                selected_advisor = None
+            # --- B. 顾问六维诊断 (雷达图) ---
+            st.markdown("### 🕵️‍♀️ 顾问深度诊断")
             
-        with col_radar:
-            if selected_advisor:
-                p = merged[merged['Name'] == selected_advisor].iloc[0]
+            c_selector, c_radar = st.columns([1, 2])
+            
+            with c_selector:
+                st.subheader("👥 顾问名单")
+                # 按质检分排序显示
+                sorted_names = df.sort_values('Score', ascending=False)['Name'].unique()
+                selected_advisor = st.radio("请选择顾问:", sorted_names)
+            
+            with c_radar:
+                # 获取该顾问数据
+                p = df[df['Name'] == selected_advisor].iloc[0]
                 
-                # 准备雷达图数据
+                st.subheader(f"📊 {selected_advisor} 的六维能力模型")
+                
+                # 雷达图
                 categories = ['60秒占比', '用车需求', '车型信息', '政策相关', '添加微信', '明确到店']
-                # 确保取出的数据是数值型
-                values = [
-                    float(p[col_60s]), 
-                    float(p[col_needs]), 
-                    float(p[col_car]), 
-                    float(p[col_policy]), 
-                    float(p[col_wechat]), 
-                    float(p[col_time])
-                ]
+                values = [p['S_60s'], p['S_Needs'], p['S_Car'], p['S_Policy'], p['S_Wechat'], p['S_Time']]
                 
-                # 绘制雷达图
                 fig = go.Figure()
                 fig.add_trace(go.Scatterpolar(
                     r=values,
                     theta=categories,
                     fill='toself',
-                    name=str(selected_advisor),
+                    name=selected_advisor,
                     line_color='#bb0a30'
                 ))
                 fig.update_layout(
                     polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
                     showlegend=False,
-                    title=f"{selected_advisor} 的质检能力模型",
                     height=400
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-        # C. 详细得分与 AI 建议
-        if selected_advisor:
+            # --- C. 详细数据与 AI 建议 ---
             st.markdown("---")
-            st.subheader(f"📝 {selected_advisor} 的智能改进方案")
+            st.subheader(f"📝 {selected_advisor} 的改进方案")
             
-            c_score, c_advice = st.columns([1, 1])
+            d1, d2 = st.columns(2)
             
-            with c_score:
-                st.caption("各项指标具体得分")
-                # 创建字典
-                col_metrics = {
-                    '60秒通话占比 (基石)': p[col_60s],
-                    '用车需求 (挖掘)': p[col_needs],
-                    '车型信息 (专业)': p[col_car],
-                    '政策相关 (专业)': p[col_policy],
-                    '添加微信 (留存)': p[col_wechat],
-                    '明确到店 (结果)': p[col_time]
-                }
+            with d1:
+                st.info("📋 **执行与结果数据**")
+                st.write(f"⏱️ **DCC平均通话时长**: {p['Duration']} 秒")
+                st.write(f"📉 **线索转化率**: {p['转化率']}% (线索 {int(p['Leads'])} -> 到店 {int(p['Visits'])})")
                 
-                for k, v in col_metrics.items():
-                    sub_c1, sub_c2 = st.columns([3, 1])
-                    val = float(v)
-                    # 进度条
-                    sub_c1.progress(min(val/100, 1.0))
-                    sub_c2.write(f"{val} 分")
+                st.markdown("#### 六维得分详情")
+                metrics = {
+                    '60秒通话占比': p['S_60s'],
+                    '用车需求': p['S_Needs'],
+                    '车型信息': p['S_Car'],
+                    '政策相关': p['S_Policy'],
+                    '添加微信': p['S_Wechat'],
+                    '明确到店': p['S_Time']
+                }
+                for k, v in metrics.items():
+                    col_x, col_y = st.columns([3, 1])
+                    col_x.progress(min(v/100, 1.0))
+                    col_y.write(f"{v} 分")
                     st.caption(k)
 
-            with c_advice:
-                st.caption("AI 诊断建议")
-                issues_found = False
+            with d2:
+                st.error("🤖 **AI 智能诊断 (基于业务规则)**")
+                issues = []
                 
-                # 诊断逻辑
-                # 1. 明确到店
-                if p[col_time] < 60:
-                    st.error(f"🔴 **【致命短板】明确到店 (得分 {p[col_time]})**")
-                    st.write("👉 建议：必须使用二选一法则（上午还是下午？）来锁定时间，而不是问“什么时候”。")
-                    issues_found = True
-                
-                # 2. 60秒占比
-                if p[col_60s] < 60:
-                    st.warning(f"🟠 **【基石不稳】60秒占比 (得分 {p[col_60s]})**")
-                    st.write("👉 建议：优化开场白，前3句必须抛出利益点（如现车、活动），防止客户秒挂。")
-                    issues_found = True
-                    
-                # 3. 添加微信
-                if p[col_wechat] < 60:
-                    st.warning(f"🟠 **【私域缺失】添加微信 (得分 {p[col_wechat]})**")
-                    st.write("👉 建议：通话结束前，以“发具体配置表/定位”为由尝试加微。")
-                    issues_found = True
-                
-                # 4. 用车需求
-                if p[col_needs] < 60:
-                    st.info(f"🔵 **用车需求 (得分 {p[col_needs]})**")
-                    st.write("👉 建议：多使用开放式提问（如：您主要在市区跑还是跑长途？）。")
-                    issues_found = True
-                    
-                if not issues_found:
-                    st.success("✅ 该顾问六维能力非常均衡，表现优秀！")
+                # 规则 1: 明确到店时间 (核心)
+                if p['S_Time'] < 60:
+                    st.markdown(f"🔴 **【致命短板】明确到店 (得分 {p['S_Time']})**")
+                    st.markdown("> **问题**：未有效引导客户确认到店时间。")
+                    st.markdown("> **话术**：采用二选一法则：“您是周六上午方便，还是下午方便？”")
+                    issues.append(1)
 
-    except Exception as e:
-        st.error("❌ 发生错误")
-        st.write(f"错误信息: {e}")
-        st.warning("提示：请检查上传的文件列名是否正确，或者是否包含空数据。")
+                # 规则 2: 60秒通话 (基石)
+                if p['S_60s'] < 60:
+                    st.markdown(f"🟠 **【基石不稳】60秒占比 (得分 {p['S_60s']})**")
+                    st.markdown("> **问题**：客户挂断过快，开场白缺乏吸引力。")
+                    st.markdown("> **话术**：前3句需抛出利益点（如现车资源、限时活动）。")
+                    issues.append(1)
 
+                # 规则 3: 添加微信
+                if p['S_Wechat'] < 80:
+                    st.markdown(f"🟠 **【私域缺失】添加微信 (得分 {p['S_Wechat']})**")
+                    st.markdown("> **问题**：未尝试留存私域流量。")
+                    st.markdown("> **话术**：以“发具体配置表”或“发定位”为由尝试加微。")
+                    issues.append(1)
+                
+                # 规则 4: 通话时长
+                if p['Duration'] < 40:
+                    st.markdown(f"🔵 **【沟通过浅】通话时长 ({p['Duration']}秒)**")
+                    st.markdown("> **建议**：增加开放式提问，深入挖掘客户用车场景。")
+                    issues.append(1)
+
+                if not issues:
+                    st.success("✅ 该顾问表现优秀，各项核心指标均无明显短板！")
+
+        else:
+            st.warning("数据合并后为空。请检查您的三个表格中【顾问姓名】列是否一致（是否有空格或错别字）。")
 else:
-    st.info("👈 请在左侧上传全部 3 个文件以生成看板")
+    # 初始空状态
+    st.info("👈 请在左侧侧边栏上传您的 3 个 Excel/CSV 文件。")
+    st.markdown("""
+    ### 👋 欢迎使用
+    上传文件后，系统将自动关联分析以下数据：
+    1. **结果数据**（线索、到店、转化率）
+    2. **过程数据**（通话时长）
+    3. **质检得分**（60秒占比、用车需求、添加微信、明确到店等）
+    """)
