@@ -15,6 +15,13 @@ st.markdown("""
     .metric-card {background-color: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);}
     div[data-testid="stSelectbox"] {min-width: 200px;}
     .big-font {font-size: 18px !important; font-weight: bold;}
+    /* 调整表单提交按钮样式 */
+    div[data-testid="stFormSubmitButton"] button {
+        width: 100%;
+        background-color: #bb0a30;
+        color: white;
+        border: none;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -29,40 +36,53 @@ PATH_A = os.path.join(DATA_DIR, "ams.xlsx")         # 3. AMS
 PATH_S = os.path.join(DATA_DIR, "store_rank.csv")   # 4. 门店排名
 
 def save_uploaded_file(uploaded_file, save_path):
+    # 强制覆盖保存
     with open(save_path, "wb") as f: f.write(uploaded_file.getbuffer())
     return True
 
-# ================= 3. 侧边栏逻辑 =================
+# ================= 3. 侧边栏逻辑 (修改重点：加入表单) =================
 with st.sidebar:
     st.header("⚙️ 管理面板")
-    # 检查4个文件是否都存在
     has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(PATH_A) and os.path.exists(PATH_S)
     
     if has_data: st.success("✅ 数据状态：已就绪")
     else: st.warning("⚠️ 暂无数据")
     st.markdown("---")
     
-    with st.expander("🔐 更新数据 (仅限管理员)"):
+    with st.expander("🔐 更新数据 (仅限管理员)", expanded=True):
         pwd = st.text_input("输入管理员密码", type="password")
+        
         if pwd == ADMIN_PASSWORD:
-            st.info("🔓 请上传新文件：")
-            new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
-            new_d = st.file_uploader("2. 顾问质检表", type=["xlsx", "csv"])
-            new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
-            new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"]) 
+            st.info("🔓 身份验证通过，请上传数据：")
             
-            if st.button("🚀 确认更新数据"):
-                if new_f and new_d and new_a and new_s:
-                    save_uploaded_file(new_f, PATH_F)
-                    save_uploaded_file(new_d, PATH_D)
-                    save_uploaded_file(new_a, PATH_A)
-                    save_uploaded_file(new_s, PATH_S)
-                    
-                    st.success("数据已保存！正在刷新看板...")
-                    st.rerun()
-                else: st.error("请传齐 4 个文件")
+            # --- 使用 st.form 解决点击无反应的问题 ---
+            with st.form("data_update_form", clear_on_submit=False):
+                st.markdown("##### 必须上传所有 4 个文件：")
+                new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
+                new_d = st.file_uploader("2. 顾问质检表", type=["xlsx", "csv"])
+                new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
+                new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"]) 
+                
+                # 提交按钮
+                submitted = st.form_submit_button("🚀 确认并更新数据")
+                
+                if submitted:
+                    if new_f and new_d and new_a and new_s:
+                        with st.spinner("正在保存文件并重新计算..."):
+                            save_uploaded_file(new_f, PATH_F)
+                            save_uploaded_file(new_d, PATH_D)
+                            save_uploaded_file(new_a, PATH_A)
+                            save_uploaded_file(new_s, PATH_S)
+                        
+                        st.success("✅ 数据更新成功！页面即将刷新...")
+                        # 强制刷新页面以加载新数据
+                        st.rerun()
+                    else:
+                        st.error("❌ 更新失败：请确保 4 个文件全部都已上传。")
+        elif pwd:
+            st.error("密码错误")
 
-# ================= 4. 数据处理 =================
+# ================= 4. 数据处理逻辑 =================
 def smart_read(file_path, is_rank_file=False):
     """智能读取，支持csv/xlsx，针对排名表支持跳过首行"""
     try:
