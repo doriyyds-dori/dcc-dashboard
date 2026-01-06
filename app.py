@@ -110,7 +110,7 @@ def process_data(path_f, path_d, path_a):
                 df['线索到店率_数值'] = safe_div(df, '到店量', '线索量')
             df['线索到店率'] = (df['线索到店率_数值'] * 100).map('{:.1f}%'.format)
 
-        # --- B. DCC ---
+        # --- B. DCC (质检分) ---
         wechat_col = '添加微信.1' if '添加微信.1' in raw_d.columns else '添加微信'
         df_d = raw_d.rename(columns={
             '顾问名称': '邀约专员/管家', '质检总分': '质检总分',
@@ -118,7 +118,13 @@ def process_data(path_f, path_d, path_a):
             '政策相关': 'S_Policy', '明确到店时间': 'S_Time'
         })
         df_d['S_Wechat'] = raw_d[wechat_col]
-        df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
+        
+        # 确保分数为数字，但不要 fillna(0)，保留 NaN
+        score_cols = ['质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']
+        for c in score_cols:
+            df_d[c] = pd.to_numeric(df_d[c], errors='coerce') # 转换失败或空值都会变成 NaN
+
+        df_d = df_d[['邀约专员/管家'] + score_cols]
 
         # --- C. AMS ---
         cols_config = [
@@ -130,15 +136,12 @@ def process_data(path_f, path_d, path_a):
             ({'DCC三次外呼的线索数', '三次外呼线索数'}, 'call3_num'), 
             ({'DCC二呼状态为需再呼的线索数', '二呼状态为需再呼'}, 'call3_denom')
         ]
-
         found_rename_map = {}
         for keywords, target_name in cols_config:
             found_col = None
             for col in raw_a.columns:
                 for k in keywords:
-                    if k in str(col).strip():
-                        found_col = col
-                        break
+                    if k in str(col).strip(): found_col = col; break
                 if found_col: break
             if found_col: found_rename_map[found_col] = target_name
         
@@ -158,18 +161,21 @@ def process_data(path_f, path_d, path_a):
         final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率'] + all_ams_calc_cols
         df_a = df_a[final_ams_cols]
 
-        # --- D. Strip & Merge (核心修改点：改为 Left Join) ---
+        # --- D. Merge ---
         for df in [df_store_data, df_advisor_data, df_d, df_a]:
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        # 【核心修正】：使用 left join，确保所有在漏斗名单里的人，即使没有质检分，也会保留其 AMS 数据
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='left')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
-        full_advisors.fillna(0, inplace=True)
+        
+        # 【核心修正】：只填充"数量"列为0，绝对不要动"分数"列的 NaN
+        cols_to_fill_zero = ['线索量', '到店量', '通话时长'] + all_ams_calc_cols
+        full_advisors[cols_to_fill_zero] = full_advisors[cols_to_fill_zero].fillna(0)
+        # 注意：这里没有执行 full_advisors.fillna(0)，所以质检分里的 NaN 依然是 NaN
 
         agg_dict = {
-            '质检总分': 'mean', 'S_Time': 'mean', 'S_60s': 'mean',
+            '质检总分': 'mean', 'S_Time': 'mean', 'S_60s': 'mean', # mean 会自动忽略 NaN，得出正确平均分
             'conn_num': 'sum', 'conn_denom': 'sum',
             'timely_num': 'sum', 'timely_denom': 'sum',
             'call2_num': 'sum', 'call2_denom': 'sum',
@@ -177,7 +183,7 @@ def process_data(path_f, path_d, path_a):
         }
         store_scores = full_advisors.groupby('门店名称').agg(agg_dict).reset_index()
         
-        # 聚合后重新计算门店级/全区级的率
+        # 聚合后重新计算率
         store_scores['外呼接通率'] = safe_div(store_scores, 'conn_num', 'conn_denom')
         store_scores['DCC及时处理率'] = safe_div(store_scores, 'timely_num', 'timely_denom')
         store_scores['DCC二次外呼率'] = safe_div(store_scores, 'call2_num', 'call2_denom')
@@ -213,7 +219,7 @@ if has_data:
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
-            kpi_score = df_advisors['质检总分'].mean()
+            kpi_score = df_advisors['质检总分'].mean() # 这里会自动忽略 NaN
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
@@ -256,34 +262,41 @@ if has_data:
         
         st.caption("注：以上为加权平均值 (总分子 / 总分母)")
 
-        # 2.2 关联图表
+        # 2.2 关联图表 (为展示美观，画图时将 NaN 质检分暂填为 0，但提示用户)
         c_proc_1, c_proc_2 = st.columns(2)
+        
+        # 绘图数据准备 (仅用于绘图，不影响 KPI 计算)
+        plot_df_vis = current_df.copy()
+        # 将分数 NaN 填为 0 以免散点图报错，或者过滤掉
+        # 策略：为了能看到所有人（即使没质检分），我们将质检分填为 0，但在 hover 里显示 '无'
+        plot_df_vis['质检总分_显示'] = plot_df_vis['质检总分'].fillna(0)
         
         with c_proc_1:
             st.markdown("#### 🕵️ 异常侦测：DCC外呼接通率 vs 60秒通话占比")
             st.info("💡 **分析逻辑：** 右下角（接通率高但60秒占比低）代表可能存在“人为压低时长/话术差”问题。")
             
             fig_p1 = px.scatter(
-                current_df, 
+                plot_df_vis, 
                 x="外呼接通率", 
                 y="S_60s", 
                 size="线索量",
-                color="质检总分",
+                color="质检总分_显示",
                 hover_name="名称",
                 labels={"外呼接通率": "外呼接通率", "S_60s": "60秒通话占比得分"},
                 color_continuous_scale="RdYlGn", 
                 height=350
             )
             fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
-            fig_p1.add_hline(y=current_df['S_60s'].mean(), line_dash="dash", line_color="gray")
+            # 注意：这里的 S_60s 平均值计算也要忽略 NaN
+            fig_p1.add_hline(y=plot_df_vis['S_60s'].mean(), line_dash="dash", line_color="gray")
             fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
 
             fig_p1.update_traces(
                 customdata=np.stack((
-                    current_df['线索量'], 
-                    current_df['外呼接通率'], 
-                    current_df['S_60s'], 
-                    current_df['质检总分']
+                    plot_df_vis['线索量'], 
+                    plot_df_vis['外呼接通率'], 
+                    plot_df_vis['S_60s'].fillna(0), 
+                    plot_df_vis['质检总分'].fillna(0)
                 ), axis=-1),
                 hovertemplate=(
                     "<b>%{hovertext}</b><br><br>" +
@@ -302,7 +315,7 @@ if has_data:
             
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             
-            plot_df_corr = current_df.copy()
+            plot_df_corr = plot_df_vis.copy()
             plot_df_corr['转化率%'] = plot_df_corr['线索到店率_数值'] * 100
             
             fig_p2 = px.scatter(
@@ -310,7 +323,7 @@ if has_data:
                 x=x_axis_choice,
                 y="转化率%",
                 size="线索量",
-                color="质检总分",
+                color="质检总分_显示",
                 hover_name="名称",
                 labels={x_axis_choice: x_axis_choice, "转化率%": "线索到店率(%)"},
                 color_continuous_scale="Blues",
@@ -325,7 +338,7 @@ if has_data:
                     plot_df_corr['DCC二次外呼率'], 
                     plot_df_corr['DCC三次外呼率'],
                     plot_df_corr['线索到店率_数值'],
-                    plot_df_corr['质检总分']
+                    plot_df_corr['质检总分'].fillna(0)
                 ), axis=-1),
                 hovertemplate=(
                     "<b>%{hovertext}</b><br><br>" +
@@ -348,7 +361,10 @@ if has_data:
         
         with c_left:
             st.markdown(f"### 🏆 {rank_title}")
-            rank_df = current_df[['名称', '线索到店率', '线索到店率_数值', '质检总分']].sort_values('线索到店率_数值', ascending=False).head(15)
+            # 排序时把 NaN 视为 0 放在最后
+            rank_df = current_df[['名称', '线索到店率', '线索到店率_数值', '质检总分']].copy()
+            rank_df['Sort_Score'] = rank_df['线索到店率_数值'].fillna(-1)
+            rank_df = rank_df.sort_values('Sort_Score', ascending=False).head(15)
             display_df = rank_df[['名称', '线索到店率', '质检总分']]
             
             st.dataframe(
@@ -365,7 +381,7 @@ if has_data:
 
         with c_right:
             st.markdown("### 💡 话术质量 vs 转化结果")
-            plot_df = current_df.copy()
+            plot_df = plot_df_vis.copy() # 使用处理过可视化的数据
             plot_df['转化率%'] = plot_df['线索到店率_数值'] * 100
             
             fig = px.scatter(
@@ -373,7 +389,7 @@ if has_data:
                 x="S_Time", 
                 y="转化率%", 
                 size="线索量", 
-                color="质检总分",
+                color="质检总分_显示",
                 hover_name="名称",
                 labels={"S_Time": "明确到店时间得分", "转化率%": "线索到店率(%)"},
                 color_continuous_scale="Reds", 
@@ -384,8 +400,8 @@ if has_data:
                 customdata=np.stack((
                     plot_df['线索量'], 
                     plot_df['线索到店率_数值'], 
-                    plot_df['质检总分'], 
-                    plot_df['S_Time']
+                    plot_df['质检总分'].fillna(0), 
+                    plot_df['S_Time'].fillna(0)
                 ), axis=-1),
                 
                 hovertemplate=(
@@ -399,6 +415,7 @@ if has_data:
             )
 
             if not plot_df.empty:
+                # 均值线也要忽略 NaN
                 fig.add_vline(x=plot_df['S_Time'].mean(), line_dash="dash", line_color="gray")
                 fig.add_hline(y=kpi_rate * 100, line_dash="dash", line_color="gray")
             st.plotly_chart(fig, use_container_width=True)
@@ -430,13 +447,17 @@ if has_data:
 
                     with d2:
                         st.caption("质检得分详情 (QUALITY)")
+                        # 处理 NaN，防止报错
+                        def get_score(val):
+                            return 0 if pd.isna(val) else val
+
                         metrics = {
-                            "明确到店时间": p['S_Time'], 
-                            "60秒通话占比": p['S_60s'],
-                            "用车需求": p['S_Needs'], 
-                            "车型信息介绍": p['S_Car'], 
-                            "政策相关话术": p['S_Policy'], 
-                            "添加微信": p['S_Wechat']
+                            "明确到店时间": get_score(p['S_Time']), 
+                            "60秒通话占比": get_score(p['S_60s']),
+                            "用车需求": get_score(p['S_Needs']), 
+                            "车型信息介绍": get_score(p['S_Car']), 
+                            "政策相关话术": get_score(p['S_Policy']), 
+                            "添加微信": get_score(p['S_Wechat'])
                         }
                         for k, v in metrics.items():
                             c_a, c_b = st.columns([3, 1])
@@ -446,15 +467,16 @@ if has_data:
 
                     with d3:
                         with st.container():
-                            st.error("🤖诊断建议")
+                            st.error("🤖 诊断建议")
                             issues = []
-                            if p['S_Time'] < 60:
+                            # 只有当质检分不是 NaN 时才诊断，否则可能是未考核
+                            if not pd.isna(p['S_Time']) and p['S_Time'] < 60:
                                 st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。")
                                 issues.append(1)
-                            if p['S_60s'] < 60:
+                            if not pd.isna(p['S_60s']) and p['S_60s'] < 60:
                                 st.markdown(f"🟠 **60秒占比 (得分{p['S_60s']:.1f})**\n开场白需抛出利益点。")
                                 issues.append(1)
-                            if p['S_Wechat'] < 80:
+                            if not pd.isna(p['S_Wechat']) and p['S_Wechat'] < 80:
                                 st.markdown(f"🟠 **添加微信 (得分{p['S_Wechat']:.1f})**\n建议以发定位为由加微。")
                                 issues.append(1)
                             if not issues: st.success("各项指标表现优秀！")
