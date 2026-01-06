@@ -411,7 +411,6 @@ if has_data:
             if selected_store == "全部":
                 st.info("💡 请先在右上方选择具体【门店】，查看该门店下的顾问详细诊断。")
             else:
-                # 【修改点】：只显示有线索量的人
                 diag_df = current_df[current_df['线索量'] > 0].copy()
                 diag_list = sorted(diag_df['邀约专员/管家'].unique())
                 
@@ -449,11 +448,53 @@ if has_data:
                         with st.container():
                             if has_score:
                                 st.error("🤖 诊断建议")
-                                issues = []
-                                if not pd.isna(p['S_Time']) and p['S_Time'] < 60: st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。"); issues.append(1)
-                                if not pd.isna(p['S_60s']) and p['S_60s'] < 60: st.markdown(f"🟠 **60秒占比 (得分{p['S_60s']:.1f})**\n开场白需抛出利益点。"); issues.append(1)
-                                if not pd.isna(p['S_Wechat']) and p['S_Wechat'] < 80: st.markdown(f"🟠 **添加微信 (得分{p['S_Wechat']:.1f})**\n建议以发定位为由加微。"); issues.append(1)
-                                if not issues: st.success("各项指标表现优秀！")
+                                
+                                # --- 核心逻辑开始 ---
+                                val_60s = 0 if pd.isna(p['S_60s']) else p['S_60s']
+                                
+                                other_kpis = {
+                                    "明确到店": (p['S_Time'], "建议使用二选一法锁定时间。"),
+                                    "添加微信": (p['S_Wechat'], "建议以发定位为由加微。"),
+                                    "用车需求": (p['S_Needs'], "需加强需求挖掘能力。"),
+                                    "车型信息": (p['S_Car'], "需提升产品DCC话术熟练度。"),
+                                    "政策相关": (p['S_Policy'], "需准确传达促销政策利益点。")
+                                }
+                                
+                                # 整理其他指标
+                                cleaned_others = {}
+                                for k, (v, advice) in other_kpis.items():
+                                    cleaned_others[k] = (0 if pd.isna(v) else v, advice)
+
+                                issues_list = []
+                                is_failing = False
+                                
+                                # 1. 检查不及格项
+                                if val_60s < 60:
+                                    issues_list.append(f"🟠 **60秒占比 (得分{val_60s:.1f})**\n开场白需抛出利益点。")
+                                    is_failing = True
+                                    
+                                for k, (score, advice) in cleaned_others.items():
+                                    if score < 80:
+                                        issues_list.append(f"🔴 **{k} (得分{score:.1f})**\n{advice}")
+                                        is_failing = True
+                                        
+                                # 2. 诊断输出
+                                if is_failing:
+                                    for item in issues_list:
+                                        st.markdown(item)
+                                    st.warning("⚠️ 存在明显短板，请重点辅导。")
+                                else:
+                                    # 3. 区分优秀与合格
+                                    # 逻辑：如果没有failing，说明 60s>=60 且 其他>=80
+                                    # 现在检查是否所有其他指标都 >= 85
+                                    all_above_85 = all(score >= 85 for score, _ in cleaned_others.values())
+                                    
+                                    if all_above_85:
+                                        st.success("🌟 **各项指标表现优秀！**")
+                                    else:
+                                        st.info("✅ **各项指标合格**\n目前表现稳定，但部分指标未达到85分卓越标准，仍有提升空间。")
+                                # --- 核心逻辑结束 ---
+                                
                             else: st.info("暂无数据，无法生成诊断建议。")
                 else: st.warning("该门店下暂无数据。")
 else:
