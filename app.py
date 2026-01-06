@@ -13,49 +13,37 @@ st.markdown("""
     .top-container {display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 2px solid #f0f0f0;}
     .metric-card {background-color: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);}
     div[data-testid="stSelectbox"] {min-width: 200px;}
+    .big-font {font-size: 18px !important; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
 # ================= 2. 安全锁与文件存储 =================
-
-# 设定您的管理员密码
-ADMIN_PASSWORD = "AudiSARR3" 
-
+ADMIN_PASSWORD = "audi" 
 DATA_DIR = "data_store"
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-
+if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 PATH_F = os.path.join(DATA_DIR, "funnel.xlsx")
 PATH_D = os.path.join(DATA_DIR, "dcc.xlsx")
 PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
 
 def save_uploaded_file(uploaded_file, save_path):
-    with open(save_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    with open(save_path, "wb") as f: f.write(uploaded_file.getbuffer())
     return True
 
 # ================= 3. 侧边栏逻辑 =================
 with st.sidebar:
     st.header("⚙️ 管理面板")
-    
     has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(PATH_A)
-    
-    if has_data:
-        st.success("✅ 数据状态：已就绪")
-    else:
-        st.warning("⚠️ 暂无数据")
-    
+    if has_data: st.success("✅ 数据状态：已就绪")
+    else: st.warning("⚠️ 暂无数据")
     st.markdown("---")
     
     with st.expander("🔐 更新数据 (仅限管理员)"):
         pwd = st.text_input("输入管理员密码", type="password")
-        
         if pwd == ADMIN_PASSWORD:
             st.info("🔓 请上传新文件：")
             new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
             new_d = st.file_uploader("2. 管家排名表", type=["xlsx", "csv"])
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
-            
             if st.button("🚀 确认更新数据"):
                 if new_f and new_d and new_a:
                     save_uploaded_file(new_f, PATH_F)
@@ -63,8 +51,7 @@ with st.sidebar:
                     save_uploaded_file(new_a, PATH_A)
                     st.success("更新成功！正在刷新...")
                     st.rerun()
-                else:
-                    st.error("请传齐 3 个文件")
+                else: st.error("请传齐 3 个文件")
 
 # ================= 4. 数据处理 =================
 def smart_read(file_path):
@@ -77,12 +64,24 @@ def smart_read(file_path):
             else: return pd.read_excel(file_path)
     except: return None
 
+def clean_percent_col(df, col_name):
+    """辅助函数：清理百分比列，转为小数"""
+    if col_name not in df.columns: return
+    # 如果是字符串带%，去掉%转数字除100
+    if df[col_name].dtype == object:
+        df[col_name] = df[col_name].astype(str).str.replace('%', '').astype(float) / 100
+    else:
+        # 如果是数字，判断是否需要除100 (大于1算百分数)
+        # 用 mask 防止全0时误判，这里简单处理
+        mask = df[col_name] > 1.0
+        df.loc[mask, col_name] = df.loc[mask, col_name] / 100
+    df[col_name] = df[col_name].fillna(0)
+
 def process_data(path_f, path_d, path_a):
     try:
         raw_f = smart_read(path_f)
         raw_d = smart_read(path_d)
         raw_a = smart_read(path_a)
-
         if raw_f is None or raw_d is None or raw_a is None: return None, None
 
         # --- A. 漏斗表 ---
@@ -96,51 +95,77 @@ def process_data(path_f, path_d, path_a):
         if col_excel_rate: rename_dict[col_excel_rate] = 'Excel_Rate'
         
         df_f = raw_f.rename(columns=rename_dict)
-        
         df_store_data = df_f[df_f['邀约专员/管家'].astype(str).str.contains('小计', na=False)].copy()
         df_advisor_data = df_f[~df_f['邀约专员/管家'].astype(str).str.contains('计|-', na=False)].copy()
 
         for df in [df_store_data, df_advisor_data]:
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
-            
             if 'Excel_Rate' in df.columns:
-                df['Excel_Rate'] = pd.to_numeric(df['Excel_Rate'], errors='coerce').fillna(0)
-                if df['Excel_Rate'].max() > 1.0:
-                    df['线索到店率_数值'] = df['Excel_Rate'] / 100
-                else:
-                    df['线索到店率_数值'] = df['Excel_Rate']
+                clean_percent_col(df, 'Excel_Rate') # 使用辅助函数清洗
+                df['线索到店率_数值'] = df['Excel_Rate']
             else:
                 df['线索到店率_数值'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
-            
             df['线索到店率'] = (df['线索到店率_数值'] * 100).map('{:.1f}%'.format)
 
         # --- B. DCC ---
         wechat_col = '添加微信.1' if '添加微信.1' in raw_d.columns else '添加微信'
         df_d = raw_d.rename(columns={
             '顾问名称': '邀约专员/管家', '质检总分': '质检总分',
-            '60秒通话': 'S_60s', '用车需求': 'S_Needs', 
-            '车型信息': 'S_Car', '政策相关': 'S_Policy',
-            '明确到店时间': 'S_Time'
+            '60秒通话': 'S_60s', '用车需求': 'S_Needs', '车型信息': 'S_Car', 
+            '政策相关': 'S_Policy', '明确到店时间': 'S_Time'
         })
         df_d['S_Wechat'] = raw_d[wechat_col]
         df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
 
-        # --- C. AMS ---
-        df_a = raw_a.rename(columns={'管家姓名': '邀约专员/管家', 'DCC平均通话时长': '通话时长'})
-        df_a = df_a[['邀约专员/管家', '通话时长']]
+        # --- C. AMS (新增 4 个监控指标) ---
+        # 尝试自动寻找列名，增加容错性
+        ams_cols = {
+            '管家姓名': '邀约专员/管家',
+            'DCC平均通话时长': '通话时长',
+            '外呼接通率': '外呼接通率',
+            'DCC及时处理率': 'DCC及时处理率',
+            'DCC二次外呼率': 'DCC二次外呼率',
+            'DCC三次外呼率': 'DCC三次外呼率'
+        }
+        # 如果列名有微小差异（如空格），这里做个简单的模糊匹配修正
+        ams_rename_map = {}
+        for key, target in ams_cols.items():
+            found_col = next((c for c in raw_a.columns if key in str(c).strip()), None)
+            if found_col:
+                ams_rename_map[found_col] = target
+        
+        df_a = raw_a.rename(columns=ams_rename_map)
+        
+        # 确保列存在，不存在补0
+        req_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']
+        for c in req_ams_cols:
+            if c not in df_a.columns: df_a[c] = 0
+        
+        # 清洗 AMS 的百分比列
+        for c in ['外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']:
+            clean_percent_col(df_a, c)
 
-        # --- D. Strip ---
+        df_a = df_a[req_ams_cols]
+
+        # --- D. Strip & Merge ---
         for df in [df_store_data, df_advisor_data, df_d, df_a]:
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        # --- E. Merge ---
+        # Merge
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
-        full_advisors['通话时长'] = full_advisors['通话时长'].fillna(0)
+        full_advisors.fillna(0, inplace=True)
 
-        store_scores = full_advisors.groupby('门店名称')[['质检总分', 'S_Time']].mean().reset_index()
+        # 门店聚合
+        agg_dict = {
+            '质检总分': 'mean', 'S_Time': 'mean', 
+            '外呼接通率': 'mean', 'DCC及时处理率': 'mean', 
+            'DCC二次外呼率': 'mean', 'DCC三次外呼率': 'mean',
+            'S_60s': 'mean' # 后面分析要用
+        }
+        store_scores = full_advisors.groupby('门店名称').agg(agg_dict).reset_index()
         full_stores = pd.merge(df_store_data, store_scores, on='门店名称', how='left')
         
         return full_advisors, full_stores
@@ -175,25 +200,98 @@ if has_data:
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
-            rank_title = f"👤 {selected_store} DCC/管家排名"
+            rank_title = f"👤 {selected_store} - 顾问排名"
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = current_df['质检总分'].mean()
 
+        # ------------------- 1. 核心结果 (Result) -------------------
+        st.subheader("1️⃣ 结果概览 (Result)")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("总有效线索", f"{int(kpi_leads):,}")
         k2.metric("总实际到店", f"{int(kpi_visits):,}")
         k3.metric("线索到店率", f"{kpi_rate:.1%}")
         k4.metric("平均质检总分", f"{kpi_score:.1f}")
         
+        # ------------------- 2. 外呼过程监控 (Process) [新增模块] -------------------
+        st.markdown("---")
+        st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
+        
+        # 2.1 过程指标 KPI
+        p1, p2, p3, p4 = st.columns(4)
+        avg_conn = current_df['外呼接通率'].mean()
+        avg_timely = current_df['DCC及时处理率'].mean()
+        avg_call2 = current_df['DCC二次外呼率'].mean()
+        avg_call3 = current_df['DCC三次外呼率'].mean()
+        
+        p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
+        p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
+        p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
+        p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
+        
+        st.caption("注：以上为当前筛选范围内的平均值")
+
+        # 2.2 关联分析图表
+        c_proc_1, c_proc_2 = st.columns(2)
+        
+        with c_proc_1:
+            st.markdown("#### 🕵️ 异常侦测：接通率 vs 60秒占比")
+            st.info("💡 **分析逻辑：**\n- **左下角**：接通率低导致时长短（客观原因）。\n- **右下角**：接通率高但时长短（**人为压低时长/话术差，需问责**）。")
+            
+            fig_p1 = px.scatter(
+                current_df, 
+                x="外呼接通率", 
+                y="S_60s", 
+                size="线索量",
+                color="质检总分",
+                hover_name="名称",
+                labels={"外呼接通率": "外呼接通率", "S_60s": "60秒通话占比得分"},
+                color_continuous_scale="RdYlGn", # 红黄绿，绿色代表分高
+                height=350
+            )
+            # 加平均线划分象限
+            fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
+            fig_p1.add_hline(y=current_df['S_60s'].mean(), line_dash="dash", line_color="gray")
+            
+            # 格式化坐标轴为百分比
+            fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
+            st.plotly_chart(fig_p1, use_container_width=True)
+
+        with c_proc_2:
+            st.markdown("#### 🔗 归因分析：过程指标 vs 最终转化率")
+            st.info("💡 **分析逻辑：** 观察哪个过程动作（及时/二呼/三呼）与【线索到店率】的正相关性最强，从而确定抓手。")
+            
+            # 增加一个选择器来切换X轴
+            x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
+            
+            # 准备绘图数据
+            plot_df_corr = current_df.copy()
+            plot_df_corr['转化率%'] = plot_df_corr['线索到店率_数值'] * 100
+            
+            fig_p2 = px.scatter(
+                plot_df_corr,
+                x=x_axis_choice,
+                y="转化率%",
+                size="线索量",
+                color="质检总分",
+                hover_name="名称",
+                labels={x_axis_choice: x_axis_choice, "转化率%": "线索到店率(%)"},
+                color_continuous_scale="Blues",
+                height=300
+            )
+            # 趋势线 (OLS回归) - 可选，这里用简单的散点
+            fig_p2.update_layout(xaxis=dict(tickformat=".0%"))
+            st.plotly_chart(fig_p2, use_container_width=True)
+
         st.markdown("---")
 
+        # ------------------- 3. 详细排名 & 诊断 -------------------
         c_left, c_right = st.columns([1, 2])
         
         with c_left:
-            st.markdown(f"### {rank_title}")
+            st.markdown(f"### 🏆 {rank_title}")
             rank_df = current_df[['名称', '线索到店率', '线索到店率_数值', '质检总分']].sort_values('线索到店率_数值', ascending=False).head(15)
             display_df = rank_df[['名称', '线索到店率', '质检总分']]
             
@@ -257,10 +355,7 @@ if has_data:
             else:
                 diag_list = sorted(current_df['邀约专员/管家'].unique())
                 if len(diag_list) > 0:
-                    # -------------------------------------------------------------
-                    # 修改位置：这里的标签已改为 "选择/搜索该店邀约专员/管家："
-                    # -------------------------------------------------------------
-                    selected_person = st.selectbox("🔍 选择该店邀约专员/管家：", diag_list)
+                    selected_person = st.selectbox("🔍 选择/搜索该店邀约专员/管家：", diag_list)
                     p = df_advisors[df_advisors['邀约专员/管家'] == selected_person].iloc[0]
                     
                     d1, d2, d3 = st.columns([1, 1, 1.2])
@@ -280,12 +375,9 @@ if has_data:
                     with d2:
                         st.caption("质检得分详情 (QUALITY)")
                         metrics = {
-                            "明确到店时间": p['S_Time'], 
-                            "60秒通话占比": p['S_60s'],
+                            "明确到店时间": p['S_Time'], "60秒通话占比": p['S_60s'],
                             "用车需求": p['S_Needs'], 
-                            "车型信息介绍": p['S_Car'], 
-                            "政策相关话术": p['S_Policy'], 
-                            "添加微信": p['S_Wechat']
+                            "车型信息介绍": p['S_Car'], "政策相关话术": p['S_Policy'], "添加微信": p['S_Wechat']
                         }
                         for k, v in metrics.items():
                             c_a, c_b = st.columns([3, 1])
@@ -295,7 +387,7 @@ if has_data:
 
                     with d3:
                         with st.container():
-                            st.error("🤖 诊断建议")
+                            st.error("🤖 AI 智能诊断建议")
                             issues = []
                             if p['S_Time'] < 60:
                                 st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。")
@@ -308,10 +400,7 @@ if has_data:
                                 issues.append(1)
                             if not issues: st.success("各项指标表现优秀！")
                 else:
-                    st.warning("该门店下暂无数据。")
+                    st.warning("该门店下暂无顾问数据。")
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
-
-
-
