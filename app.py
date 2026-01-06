@@ -38,11 +38,11 @@ with st.sidebar:
     st.markdown("---")
     
     with st.expander("🔐 更新数据 (仅限管理员)"):
-        pwd = st.text_input("输入管理员密码", type="password")
+        pwd = st.text_input("输入管理员密码", type="AudiSARR3")
         if pwd == ADMIN_PASSWORD:
             st.info("🔓 请上传新文件：")
             new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
-            new_d = st.file_uploader("2. 管家排名表", type=["xlsx", "csv"])
+            new_d = st.file_uploader("2. DCC质检管家排名表", type=["xlsx", "csv"])
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
             if st.button("🚀 确认更新数据"):
                 if new_f and new_d and new_a:
@@ -404,3 +404,4 @@ if has_data:
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
+
