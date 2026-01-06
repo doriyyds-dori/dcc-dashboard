@@ -64,18 +64,31 @@ def smart_read(file_path):
             else: return pd.read_excel(file_path)
     except: return None
 
+# --- 核心修复：超级强健的百分比清洗函数 ---
 def clean_percent_col(df, col_name):
-    """辅助函数：清理百分比列，转为小数"""
+    """
+    清洗百分比列：
+    1. 去除 '%'
+    2. 处理 '-' (横杠) 为 0
+    3. 强制转换为数字 (errors='coerce')
+    4. 自动判断是否需要除以100
+    """
     if col_name not in df.columns: return
-    # 如果是字符串带%，去掉%转数字除100
-    if df[col_name].dtype == object:
-        df[col_name] = df[col_name].astype(str).str.replace('%', '').astype(float) / 100
+
+    # 1. 转字符串 -> 去空格 -> 去百分号
+    # regex=False 提高性能
+    series = df[col_name].astype(str).str.strip().str.replace('%', '', regex=False)
+    
+    # 2. 核心：pd.to_numeric 会把 '-' 变成 NaN (空值)
+    # errors='coerce' 意味着：只要不是数字，通通变 NaN
+    numeric_series = pd.to_numeric(series, errors='coerce').fillna(0)
+    
+    # 3. 判断是否需要除以 100
+    # 逻辑：如果这一列最大的数大于 1.0 (比如 98.5)，说明它是百分数，需要除以100
+    if numeric_series.max() > 1.0:
+        df[col_name] = numeric_series / 100
     else:
-        # 如果是数字，判断是否需要除100 (大于1算百分数)
-        # 用 mask 防止全0时误判，这里简单处理
-        mask = df[col_name] > 1.0
-        df.loc[mask, col_name] = df.loc[mask, col_name] / 100
-    df[col_name] = df[col_name].fillna(0)
+        df[col_name] = numeric_series
 
 def process_data(path_f, path_d, path_a):
     try:
@@ -102,7 +115,7 @@ def process_data(path_f, path_d, path_a):
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
             if 'Excel_Rate' in df.columns:
-                clean_percent_col(df, 'Excel_Rate') # 使用辅助函数清洗
+                clean_percent_col(df, 'Excel_Rate') # 使用增强版清洗
                 df['线索到店率_数值'] = df['Excel_Rate']
             else:
                 df['线索到店率_数值'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -118,8 +131,7 @@ def process_data(path_f, path_d, path_a):
         df_d['S_Wechat'] = raw_d[wechat_col]
         df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
 
-        # --- C. AMS (新增 4 个监控指标) ---
-        # 尝试自动寻找列名，增加容错性
+        # --- C. AMS (模糊匹配 + 强力清洗) ---
         ams_cols = {
             '管家姓名': '邀约专员/管家',
             'DCC平均通话时长': '通话时长',
@@ -128,21 +140,20 @@ def process_data(path_f, path_d, path_a):
             'DCC二次外呼率': 'DCC二次外呼率',
             'DCC三次外呼率': 'DCC三次外呼率'
         }
-        # 如果列名有微小差异（如空格），这里做个简单的模糊匹配修正
         ams_rename_map = {}
         for key, target in ams_cols.items():
+            # 模糊查找列名 (防止空格或微小差异)
             found_col = next((c for c in raw_a.columns if key in str(c).strip()), None)
             if found_col:
                 ams_rename_map[found_col] = target
         
         df_a = raw_a.rename(columns=ams_rename_map)
         
-        # 确保列存在，不存在补0
         req_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']
         for c in req_ams_cols:
-            if c not in df_a.columns: df_a[c] = 0
+            if c not in df_a.columns: df_a[c] = 0 # 缺列补0
         
-        # 清洗 AMS 的百分比列
+        # 清洗所有百分比列 (这里最容易报错，现在有防爆盾了)
         for c in ['外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']:
             clean_percent_col(df_a, c)
 
@@ -156,6 +167,7 @@ def process_data(path_f, path_d, path_a):
         # Merge
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
+        # 填充AMS可能缺失的数据
         full_advisors.fillna(0, inplace=True)
 
         # 门店聚合
@@ -163,7 +175,7 @@ def process_data(path_f, path_d, path_a):
             '质检总分': 'mean', 'S_Time': 'mean', 
             '外呼接通率': 'mean', 'DCC及时处理率': 'mean', 
             'DCC二次外呼率': 'mean', 'DCC三次外呼率': 'mean',
-            'S_60s': 'mean' # 后面分析要用
+            'S_60s': 'mean' 
         }
         store_scores = full_advisors.groupby('门店名称').agg(agg_dict).reset_index()
         full_stores = pd.merge(df_store_data, store_scores, on='门店名称', how='left')
@@ -207,7 +219,7 @@ if has_data:
             else: kpi_rate = 0
             kpi_score = current_df['质检总分'].mean()
 
-        # ------------------- 1. 核心结果 (Result) -------------------
+        # ------------------- 1. 结果 (Result) -------------------
         st.subheader("1️⃣ 结果概览 (Result)")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("总有效线索", f"{int(kpi_leads):,}")
@@ -215,7 +227,7 @@ if has_data:
         k3.metric("线索到店率", f"{kpi_rate:.1%}")
         k4.metric("平均质检总分", f"{kpi_score:.1f}")
         
-        # ------------------- 2. 外呼过程监控 (Process) [新增模块] -------------------
+        # ------------------- 2. 过程 (Process) -------------------
         st.markdown("---")
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
         
@@ -233,12 +245,12 @@ if has_data:
         
         st.caption("注：以上为当前筛选范围内的平均值")
 
-        # 2.2 关联分析图表
+        # 2.2 关联图表
         c_proc_1, c_proc_2 = st.columns(2)
         
         with c_proc_1:
             st.markdown("#### 🕵️ 异常侦测：接通率 vs 60秒占比")
-            st.info("💡 **分析逻辑：**\n- **左下角**：接通率低导致时长短（客观原因）。\n- **右下角**：接通率高但时长短（**人为压低时长/话术差，需问责**）。")
+            st.info("💡 **分析逻辑：** 右下角（接通率高但60秒占比低）代表可能存在“人为压低时长/话术差”问题。")
             
             fig_p1 = px.scatter(
                 current_df, 
@@ -248,25 +260,20 @@ if has_data:
                 color="质检总分",
                 hover_name="名称",
                 labels={"外呼接通率": "外呼接通率", "S_60s": "60秒通话占比得分"},
-                color_continuous_scale="RdYlGn", # 红黄绿，绿色代表分高
+                color_continuous_scale="RdYlGn", 
                 height=350
             )
-            # 加平均线划分象限
             fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
             fig_p1.add_hline(y=current_df['S_60s'].mean(), line_dash="dash", line_color="gray")
-            
-            # 格式化坐标轴为百分比
             fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
             st.plotly_chart(fig_p1, use_container_width=True)
 
         with c_proc_2:
             st.markdown("#### 🔗 归因分析：过程指标 vs 最终转化率")
-            st.info("💡 **分析逻辑：** 观察哪个过程动作（及时/二呼/三呼）与【线索到店率】的正相关性最强，从而确定抓手。")
+            st.info("💡 **分析逻辑：** 观察哪个动作与成交相关性最强。")
             
-            # 增加一个选择器来切换X轴
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             
-            # 准备绘图数据
             plot_df_corr = current_df.copy()
             plot_df_corr['转化率%'] = plot_df_corr['线索到店率_数值'] * 100
             
@@ -281,7 +288,6 @@ if has_data:
                 color_continuous_scale="Blues",
                 height=300
             )
-            # 趋势线 (OLS回归) - 可选，这里用简单的散点
             fig_p2.update_layout(xaxis=dict(tickformat=".0%"))
             st.plotly_chart(fig_p2, use_container_width=True)
 
