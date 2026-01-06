@@ -75,7 +75,6 @@ def clean_percent_col(df, col_name):
     else:
         df[col_name] = numeric_series
 
-# --- 安全除法函数 ---
 def safe_div(df, num_col, denom_col):
     """计算两列相除，处理分母为0的情况"""
     num = pd.to_numeric(df[num_col], errors='coerce').fillna(0)
@@ -123,36 +122,20 @@ def process_data(path_f, path_d, path_a):
         df_d['S_Wechat'] = raw_d[wechat_col]
         df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
 
-        # --- C. AMS (核心修正：严格按照分子分母计算) ---
-        
-        # 1. 定义映射关系：{ 'Excel原始列名关键词': '代码内部变量名' }
-        # 我们使用 list 来存储可能的列名匹配，确保找到最准确的那个
+        # --- C. AMS ---
         cols_config = [
             ({'管家姓名'}, '邀约专员/管家'),
             ({'DCC平均通话时长'}, '通话时长'),
-            
-            # 1. 外呼接通率 = DCC接通线索数 / DCC外呼线索数
-            ({'DCC接通线索数'}, 'conn_num'),
-            ({'DCC外呼线索数'}, 'conn_denom'),
-            
-            # 2. DCC及时处理率 = DCC及时处理线索 / 需外呼线索数
-            ({'DCC及时处理线索'}, 'timely_num'),
-            ({'需外呼线索数'}, 'timely_denom'),
-            
-            # 3. 二次外呼率 = 二次外呼线索数 / 需再呼线索数
-            ({'二次外呼线索数'}, 'call2_num'),
-            ({'需再呼线索数'}, 'call2_denom'),
-            
-            # 4. 三次外呼率 = DCC三次外呼的线索数 / DCC二呼状态为需再呼的线索数
-            ({'DCC三次外呼的线索数', '三次外呼线索数'}, 'call3_num'), # 增加关键词容错
+            # 分子分母配置
+            ({'DCC接通线索数'}, 'conn_num'), ({'DCC外呼线索数'}, 'conn_denom'),
+            ({'DCC及时处理线索'}, 'timely_num'), ({'需外呼线索数'}, 'timely_denom'),
+            ({'二次外呼线索数'}, 'call2_num'), ({'需再呼线索数'}, 'call2_denom'),
+            ({'DCC三次外呼的线索数', '三次外呼线索数'}, 'call3_num'), 
             ({'DCC二呼状态为需再呼的线索数', '二呼状态为需再呼'}, 'call3_denom')
         ]
 
-        # 2. 查找并重命名列
         found_rename_map = {}
         for keywords, target_name in cols_config:
-            # 尝试在 raw_a.columns 中找到包含关键词的列
-            # 优先找最长匹配（更精确），这里简单用第一个匹配到的
             found_col = None
             for col in raw_a.columns:
                 for k in keywords:
@@ -160,25 +143,25 @@ def process_data(path_f, path_d, path_a):
                         found_col = col
                         break
                 if found_col: break
-            
-            if found_col:
-                found_rename_map[found_col] = target_name
+            if found_col: found_rename_map[found_col] = target_name
         
         df_a = raw_a.rename(columns=found_rename_map)
         
-        # 3. 补齐缺失列（防止报错）
-        needed_cols = ['邀约专员/管家', '通话时长', 'conn_num', 'conn_denom', 'timely_num', 'timely_denom', 'call2_num', 'call2_denom', 'call3_num', 'call3_denom']
-        for c in needed_cols:
+        # 补全缺失列
+        all_ams_calc_cols = ['conn_num', 'conn_denom', 'timely_num', 'timely_denom', 
+                             'call2_num', 'call2_denom', 'call3_num', 'call3_denom']
+        for c in all_ams_calc_cols:
             if c not in df_a.columns: df_a[c] = 0
-            
-        # 4. 【关键】执行除法计算
+            else: df_a[c] = pd.to_numeric(df_a[c], errors='coerce').fillna(0)
+
+        # 计算个人层面的率
         df_a['外呼接通率'] = safe_div(df_a, 'conn_num', 'conn_denom')
         df_a['DCC及时处理率'] = safe_div(df_a, 'timely_num', 'timely_denom')
         df_a['DCC二次外呼率'] = safe_div(df_a, 'call2_num', 'call2_denom')
         df_a['DCC三次外呼率'] = safe_div(df_a, 'call3_num', 'call3_denom')
 
-        # 只保留最终结果
-        final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']
+        # 保留所有分子分母列，供聚合使用
+        final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率'] + all_ams_calc_cols
         df_a = df_a[final_ams_cols]
 
         # --- D. Strip & Merge ---
@@ -190,13 +173,22 @@ def process_data(path_f, path_d, path_a):
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         full_advisors.fillna(0, inplace=True)
 
+        # 门店聚合：关键是 sum 分子和分母
         agg_dict = {
-            '质检总分': 'mean', 'S_Time': 'mean', 
-            '外呼接通率': 'mean', 'DCC及时处理率': 'mean', 
-            'DCC二次外呼率': 'mean', 'DCC三次外呼率': 'mean',
-            'S_60s': 'mean' 
+            '质检总分': 'mean', 'S_Time': 'mean', 'S_60s': 'mean',
+            'conn_num': 'sum', 'conn_denom': 'sum',
+            'timely_num': 'sum', 'timely_denom': 'sum',
+            'call2_num': 'sum', 'call2_denom': 'sum',
+            'call3_num': 'sum', 'call3_denom': 'sum'
         }
         store_scores = full_advisors.groupby('门店名称').agg(agg_dict).reset_index()
+        
+        # 聚合后重新计算门店级的率
+        store_scores['外呼接通率'] = safe_div(store_scores, 'conn_num', 'conn_denom')
+        store_scores['DCC及时处理率'] = safe_div(store_scores, 'timely_num', 'timely_denom')
+        store_scores['DCC二次外呼率'] = safe_div(store_scores, 'call2_num', 'call2_denom')
+        store_scores['DCC三次外呼率'] = safe_div(store_scores, 'call3_num', 'call3_denom')
+
         full_stores = pd.merge(df_store_data, store_scores, on='门店名称', how='left')
         
         return full_advisors, full_stores
@@ -250,19 +242,26 @@ if has_data:
         st.markdown("---")
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
         
-        # 2.1 过程指标 KPI
+        # 2.1 过程指标 KPI (修改点：加权平均计算)
         p1, p2, p3, p4 = st.columns(4)
-        avg_conn = current_df['外呼接通率'].mean()
-        avg_timely = current_df['DCC及时处理率'].mean()
-        avg_call2 = current_df['DCC二次外呼率'].mean()
-        avg_call3 = current_df['DCC三次外呼率'].mean()
+        
+        # 使用 sum() / sum() 计算大盘总率
+        def calc_kpi_rate(df, num, denom):
+            total_num = df[num].sum()
+            total_denom = df[denom].sum()
+            return total_num / total_denom if total_denom > 0 else 0
+
+        avg_conn = calc_kpi_rate(current_df, 'conn_num', 'conn_denom')
+        avg_timely = calc_kpi_rate(current_df, 'timely_num', 'timely_denom')
+        avg_call2 = calc_kpi_rate(current_df, 'call2_num', 'call2_denom')
+        avg_call3 = calc_kpi_rate(current_df, 'call3_num', 'call3_denom')
         
         p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
         p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
         p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         
-        st.caption("注：以上为当前筛选范围内的平均值")
+        st.caption("注：以上为加权平均值 (总分子 / 总分母)，反映整体水平")
 
         # 2.2 关联图表
         c_proc_1, c_proc_2 = st.columns(2)
