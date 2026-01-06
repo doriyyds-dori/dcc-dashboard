@@ -16,17 +16,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 只有我能更新数据 (安全锁) =================
+# ================= 2. 安全锁与文件存储 =================
 
-# 设定您的管理员密码 (请修改这里！)
+# 设定您的管理员密码
 ADMIN_PASSWORD = "AudiSARR3" 
 
-# 定义数据保存的文件夹
 DATA_DIR = "data_store"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# 定义三个文件的保存路径
 PATH_F = os.path.join(DATA_DIR, "funnel.xlsx")
 PATH_D = os.path.join(DATA_DIR, "dcc.xlsx")
 PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
@@ -40,24 +38,20 @@ def save_uploaded_file(uploaded_file, save_path):
 with st.sidebar:
     st.header("⚙️ 管理面板")
     
-    # 检查本地是否已有数据
     has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(PATH_A)
     
     if has_data:
-        st.success("✅ 当前正在使用：已存档的历史数据")
-        st.caption("刷新页面数据也不会丢失。")
+        st.success("✅ 数据状态：已就绪")
     else:
-        st.warning("⚠️ 暂无数据，请登录后上传。")
+        st.warning("⚠️ 暂无数据")
     
     st.markdown("---")
     
-    # 管理员登录框
     with st.expander("🔐 更新数据 (仅限管理员)"):
         pwd = st.text_input("输入管理员密码", type="password")
         
         if pwd == ADMIN_PASSWORD:
-            st.info("🔓 身份验证成功，请上传新文件覆盖旧数据：")
-            
+            st.info("🔓 请上传新文件：")
             new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
             new_d = st.file_uploader("2. 管家排名表", type=["xlsx", "csv"])
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
@@ -67,23 +61,18 @@ with st.sidebar:
                     save_uploaded_file(new_f, PATH_F)
                     save_uploaded_file(new_d, PATH_D)
                     save_uploaded_file(new_a, PATH_A)
-                    st.success("数据已更新！正在刷新页面...")
-                    st.rerun() # 强制刷新页面读取新数据
+                    st.success("更新成功！正在刷新...")
+                    st.rerun()
                 else:
-                    st.error("请先上传全部 3 个文件再点击更新。")
-        elif pwd:
-            st.error("密码错误")
+                    st.error("请传齐 3 个文件")
 
-# ================= 4. 数据处理 (读取本地文件) =================
+# ================= 4. 数据处理 =================
 def smart_read(file_path):
     try:
-        # 判断是上传对象还是本地路径
         if isinstance(file_path, str):
-            # 本地路径读取
             if file_path.endswith('.csv'): return pd.read_csv(file_path)
             else: return pd.read_excel(file_path)
         else:
-            # 上传对象读取 (兼容旧逻辑，虽其实用不到了)
             if file_path.name.endswith('.csv'): return pd.read_csv(file_path)
             else: return pd.read_excel(file_path)
     except: return None
@@ -96,7 +85,7 @@ def process_data(path_f, path_d, path_a):
 
         if raw_f is None or raw_d is None or raw_a is None: return None, None
 
-        # --- A. 漏斗表处理 ---
+        # --- A. 漏斗表 ---
         store_col = next((c for c in raw_f.columns if '代理商' in str(c) or '门店' in str(c)), raw_f.columns[0])
         name_col = next((c for c in raw_f.columns if '管家' in str(c) or '顾问' in str(c)), raw_f.columns[1])
         col_leads = '线上_有效线索数' if '线上_有效线索数' in raw_f.columns else '线索量'
@@ -161,14 +150,11 @@ def process_data(path_f, path_d, path_a):
         return None, None
 
 # ================= 5. 界面渲染 =================
-
-# 核心修改：不再检测上传控件，而是检测本地文件是否存在
 if has_data:
     df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A)
     
     if df_advisors is not None:
         
-        # --- 顶部布局 ---
         col_header, col_filter = st.columns([3, 1])
         with col_header: st.title("Audi | DCC 效能看板")
         with col_filter:
@@ -177,30 +163,25 @@ if has_data:
             store_options = ["全部"] + all_stores
             selected_store = st.selectbox("🏭 切换门店视图", store_options)
 
-        # --- 逻辑分支 ---
         if selected_store == "全部":
             current_df = df_stores.copy()
             current_df['名称'] = current_df['门店名称']
             rank_title = "🏆 全区门店排名"
-            
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = df_advisors['质检总分'].mean()
-
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
             rank_title = f"👤 {selected_store} - 顾问排名"
-            
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = current_df['质检总分'].mean()
 
-        # --- KPI ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("总有效线索", f"{int(kpi_leads):,}")
         k2.metric("总实际到店", f"{int(kpi_visits):,}")
@@ -209,7 +190,6 @@ if has_data:
         
         st.markdown("---")
 
-        # --- 排名 & 散点 ---
         c_left, c_right = st.columns([1, 2])
         
         with c_left:
@@ -234,19 +214,43 @@ if has_data:
             plot_df = current_df.copy()
             plot_df['转化率%'] = plot_df['线索到店率_数值'] * 100
             
+            # --- 核心修改：文案调整 ---
             fig = px.scatter(
                 plot_df, 
-                x="S_Time", y="转化率%", size="线索量", color="质检总分",
+                x="S_Time", 
+                y="转化率%", 
+                size="线索量", 
+                color="质检总分",
                 hover_name="名称",
-                labels={"S_Time": "明确到店得分", "转化率%": "线索到店率(%)"},
-                color_continuous_scale="Reds", height=400
+                labels={"S_Time": "明确到店时间得分", "转化率%": "线索到店率(%)"}, # X轴标签也改了
+                color_continuous_scale="Reds", 
+                height=400
             )
+
+            # 更新悬停内容
+            fig.update_traces(
+                customdata=np.stack((
+                    plot_df['线索量'], 
+                    plot_df['线索到店率_数值'], 
+                    plot_df['质检总分'], 
+                    plot_df['S_Time']
+                ), axis=-1),
+                
+                hovertemplate=(
+                    "<b>%{hovertext}</b><br><br>" +
+                    "线索量: %{customdata[0]:,}<br>" +
+                    "线索到店率: %{customdata[1]:.1%}<br>" +
+                    "质检总分: %{customdata[2]:.1f}<br>" +
+                    "明确到店时间得分: %{customdata[3]:.1f}" +  # 这里改成了“明确到店时间得分”
+                    "<extra></extra>"
+                )
+            )
+
             if not plot_df.empty:
                 fig.add_vline(x=plot_df['S_Time'].mean(), line_dash="dash", line_color="gray")
                 fig.add_hline(y=kpi_rate * 100, line_dash="dash", line_color="gray")
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- 诊断 ---
         st.markdown("---")
         with st.container():
             st.markdown("### 🕵️‍♀️ 管家深度诊断")
@@ -286,7 +290,7 @@ if has_data:
 
                     with d3:
                         with st.container():
-                            st.error("🤖 AI 智能诊断建议")
+                            st.error("🤖 诊断建议")
                             issues = []
                             if p['S_Time'] < 60:
                                 st.markdown(f"🔴 **明确到店 (得分{p['S_Time']:.1f})**\n建议使用二选一法锁定时间。")
@@ -301,7 +305,5 @@ if has_data:
                 else:
                     st.warning("该门店下暂无顾问数据。")
 else:
-    # 第一次进入，没有数据时的欢迎页
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
-
