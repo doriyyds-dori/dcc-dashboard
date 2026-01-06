@@ -197,6 +197,7 @@ def process_data(path_f, path_d, path_a):
         })
         df_d['S_Wechat'] = raw_d[wechat_col]
         
+        # 分数列保留 NaN (不补0)
         score_cols = ['质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']
         for c in score_cols:
             df_d[c] = pd.to_numeric(df_d[c], errors='coerce') 
@@ -230,6 +231,7 @@ def process_data(path_f, path_d, path_a):
             if c not in df_a.columns: df_a[c] = 0
             else: df_a[c] = pd.to_numeric(df_a[c], errors='coerce').fillna(0)
 
+        # 个人层面的率计算
         df_a['外呼接通率'] = safe_div(df_a, 'conn_num', 'conn_denom')
         df_a['DCC及时处理率'] = safe_div(df_a, 'timely_num', 'timely_denom')
         df_a['DCC二次外呼率'] = safe_div(df_a, 'call2_num', 'call2_denom')
@@ -246,25 +248,25 @@ def process_data(path_f, path_d, path_a):
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='left')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         
+        # 只给 AMS 数量补 0，分数保留 NaN
         cols_to_fill_zero = ['线索量', '到店量', '通话时长'] + all_ams_calc_cols
         full_advisors[cols_to_fill_zero] = full_advisors[cols_to_fill_zero].fillna(0)
 
-        # 【核心修正】：在计算门店平均分时，显式包含所有细项分数
-        # 'mean' 会自动忽略 NaN，这正是您要的（有分的人的总分 / 有分的人数）
+        # 【核心】：两条腿走路，互不干扰
+        # 1. 质检分：用 mean (自动忽略 NaN)
+        # 2. AMS：用 sum (加权)
         agg_dict = {
             '质检总分': 'mean', 
-            'S_Time': 'mean', 
-            'S_60s': 'mean',
-            'S_Needs': 'mean', 
-            'S_Car': 'mean', 
-            'S_Policy': 'mean', 
-            'S_Wechat': 'mean',
+            'S_Time': 'mean', 'S_60s': 'mean',
+            'S_Needs': 'mean', 'S_Car': 'mean', 'S_Policy': 'mean', 'S_Wechat': 'mean',
             'conn_num': 'sum', 'conn_denom': 'sum',
             'timely_num': 'sum', 'timely_denom': 'sum',
             'call2_num': 'sum', 'call2_denom': 'sum',
             'call3_num': 'sum', 'call3_denom': 'sum'
         }
         store_scores = full_advisors.groupby('门店名称').agg(agg_dict).reset_index()
+        
+        # 重新计算门店级 AMS 率 (加权)
         store_scores['外呼接通率'] = safe_div(store_scores, 'conn_num', 'conn_denom')
         store_scores['DCC及时处理率'] = safe_div(store_scores, 'timely_num', 'timely_denom')
         store_scores['DCC二次外呼率'] = safe_div(store_scores, 'call2_num', 'call2_denom')
@@ -323,6 +325,7 @@ if has_data:
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
         
         p1, p2, p3, p4 = st.columns(4)
+        # 使用加权平均计算 KPI (sum/sum)
         def calc_kpi_rate(df, num, denom):
             total_num = df[num].sum()
             total_denom = df[denom].sum()
@@ -339,6 +342,7 @@ if has_data:
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         st.caption("注：以上为加权平均值")
 
+        # 绘图数据准备
         plot_df_vis = current_df.copy()
         plot_df_vis['质检总分_显示'] = plot_df_vis['质检总分'].fillna(0) 
 
@@ -352,6 +356,7 @@ if has_data:
                 color_continuous_scale="RdYlGn", height=350
             )
             fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
+            # 这里的 mean 也是忽略 NaN 的
             fig_p1.add_hline(y=plot_df_vis['S_60s'].mean(), line_dash="dash", line_color="gray")
             fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
             fig_p1.update_traces(
@@ -455,7 +460,7 @@ if has_data:
                     with d3:
                         with st.container():
                             if has_score:
-                                st.error("🤖 诊断建议")
+                                st.error("🤖 AI 智能诊断建议")
                                 val_60s = 0 if pd.isna(p['S_60s']) else p['S_60s']
                                 other_kpis = {
                                     "明确到店": (p['S_Time'], "建议使用二选一法锁定时间。"),
