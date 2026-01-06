@@ -38,59 +38,43 @@ def process_data(f_file, d_file, a_file):
         if raw_f is None or raw_d is None or raw_a is None: return None, None
 
         # --- A. 漏斗表处理 ---
-        # 1. 找核心列
-        # 门店列
         store_col = next((c for c in raw_f.columns if '代理商' in str(c) or '门店' in str(c)), raw_f.columns[0])
-        # 姓名列
         name_col = next((c for c in raw_f.columns if '管家' in str(c) or '顾问' in str(c)), raw_f.columns[1])
-        # 线索列
         col_leads = '线上_有效线索数' if '线上_有效线索数' in raw_f.columns else '线索量'
-        # 到店列
         col_visits = '线上_到店数' if '线上_到店数' in raw_f.columns else '到店量'
+        col_excel_rate = next((c for c in raw_f.columns if '率' in str(c) and ('到店' in str(c) or '有效' in str(c))), None)
+
+        rename_dict = {store_col: '门店名称', name_col: '邀约专员/管家', col_leads: '线索量', col_visits: '到店量'}
+        if col_excel_rate: rename_dict[col_excel_rate] = 'Excel_Rate'
         
-        # 【关键】直接锁定 Excel 里的 "线上_有效线索到店率"
-        # 优先找完全匹配的，找不到再找带“率”的
-        col_excel_rate = '线上_有效线索到店率'
-        if col_excel_rate not in raw_f.columns:
-             col_excel_rate = next((c for c in raw_f.columns if '率' in str(c) and ('到店' in str(c) or '有效' in str(c))), None)
-
-        # 重命名映射
-        rename_dict = {
-            store_col: '门店名称', 
-            name_col: '邀约专员/管家', 
-            col_leads: '线索量', 
-            col_visits: '到店量'
-        }
-        if col_excel_rate: 
-            rename_dict[col_excel_rate] = 'Excel_Rate' # 标记它
-
         df_f = raw_f.rename(columns=rename_dict)
         
-        # 2. 分离 门店行(小计) 和 个人行
-        # 提取门店数据 (小计行)
+        # 分离
         df_store_data = df_f[df_f['邀约专员/管家'].astype(str).str.contains('小计', na=False)].copy()
-        # 提取顾问数据
         df_advisor_data = df_f[~df_f['邀约专员/管家'].astype(str).str.contains('计|-', na=False)].copy()
 
-        # 3. 数值清洗与率的处理
+        # 清洗
         for df in [df_store_data, df_advisor_data]:
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
             
-            # 【核心逻辑】：直接引用 Excel 里的率
+            # 【逻辑】直接取值，不计算
             if 'Excel_Rate' in df.columns:
                 df['Excel_Rate'] = pd.to_numeric(df['Excel_Rate'], errors='coerce').fillna(0)
-                # 判断百分比格式：如果大部分数据>1 (比如 5.2)，说明是 5.2%，需要除以100变成小数用于格式化
-                # 如果大部分数据<1 (比如 0.052)，说明已经是小数，不用动
+                # 判断：如果最大值>1 (如5.2)，说明是5.2%，除以100变成小数用于排序和绘图
+                # 如果最大值<1 (如0.05)，说明是小数，直接用
                 if df['Excel_Rate'].max() > 1.0:
-                    df['线索到店率'] = df['Excel_Rate'] / 100
+                    df['线索到店率_数值'] = df['Excel_Rate'] / 100
                 else:
-                    df['线索到店率'] = df['Excel_Rate']
+                    df['线索到店率_数值'] = df['Excel_Rate']
             else:
-                # 只有找不到列时才计算
-                df['线索到店率'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
+                df['线索到店率_数值'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
+            
+            # 【强制转换】生成一列专门用于显示的字符串列 "5.2%"
+            # 这样表格显示绝对不会错
+            df['线索到店率'] = (df['线索到店率_数值'] * 100).map('{:.1f}%'.format)
 
-        # --- B. DCC 表处理 ---
+        # --- B. DCC ---
         wechat_col = '添加微信.1' if '添加微信.1' in raw_d.columns else '添加微信'
         df_d = raw_d.rename(columns={
             '顾问名称': '邀约专员/管家', '质检总分': '质检总分',
@@ -101,16 +85,16 @@ def process_data(f_file, d_file, a_file):
         df_d['S_Wechat'] = raw_d[wechat_col]
         df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
 
-        # --- C. AMS 表处理 ---
+        # --- C. AMS ---
         df_a = raw_a.rename(columns={'管家姓名': '邀约专员/管家', 'DCC平均通话时长': '通话时长'})
         df_a = df_a[['邀约专员/管家', '通话时长']]
 
-        # --- D. 去空格 ---
+        # --- D. Strip ---
         for df in [df_store_data, df_advisor_data, df_d, df_a]:
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        # --- E. 组合数据 ---
+        # --- E. Merge ---
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='inner')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         full_advisors['通话时长'] = full_advisors['通话时长'].fillna(0)
@@ -133,7 +117,7 @@ if file_f and file_d and file_a:
         
         # --- 顶部布局 ---
         col_header, col_filter = st.columns([3, 1])
-        with col_header: st.title("Audi | DCC 效能质检看板")
+        with col_header: st.title("Audi | DCC 效能看板") # 已修改标题
         with col_filter:
             if not df_stores.empty: all_stores = sorted(list(df_stores['门店名称'].unique()))
             else: all_stores = sorted(list(df_advisors['门店名称'].unique()))
@@ -142,12 +126,9 @@ if file_f and file_d and file_a:
 
         # --- 逻辑分支 ---
         if selected_store == "全部":
-            # 模式 A: 门店排名
             current_df = df_stores.copy()
-            # 为了表格显示统一，把“门店名称”这列复制一份叫“名称”
             current_df['名称'] = current_df['门店名称']
             rank_title = "🏆 全区门店排名"
-            scatter_x_label = "门店平均明确到店分"
             
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
@@ -156,12 +137,9 @@ if file_f and file_d and file_a:
             kpi_score = df_advisors['质检总分'].mean()
 
         else:
-            # 模式 B: 个人排名
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
-            # 为了表格显示统一，把“邀约专员/管家”这列复制一份叫“名称”
             current_df['名称'] = current_df['邀约专员/管家']
             rank_title = f"👤 {selected_store} - 顾问排名"
-            scatter_x_label = "个人明确到店得分"
             
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
@@ -184,31 +162,29 @@ if file_f and file_d and file_a:
         with c_left:
             st.markdown(f"### {rank_title}")
             
-            # 准备表格数据：固定选取 [名称, 线索到店率, 质检总分]
-            # 这样无论切门店还是全区，列名都叫“名称”，就不会消失了
-            rank_df = current_df[['名称', '线索到店率', '质检总分']].sort_values('线索到店率', ascending=False).head(15)
+            # 【核心】这里使用 '线索到店率_数值' 来排序，但展示用 '线索到店率' (字符串)
+            rank_df = current_df[['名称', '线索到店率', '线索到店率_数值', '质检总分']].sort_values('线索到店率_数值', ascending=False).head(15)
+            
+            # 最终展示的表格只保留字符串格式的率
+            display_df = rank_df[['名称', '线索到店率', '质检总分']]
             
             st.dataframe(
-                rank_df,
+                display_df,
                 hide_index=True,
                 use_container_width=True,
                 height=400,
                 column_config={
                     "名称": st.column_config.TextColumn("名称"),
-                    "线索到店率": st.column_config.NumberColumn(
-                        "线索到店率",
-                        format="%.1f%%", # 强制百分比格式，解决手动格式问题
-                    ),
-                    "质检总分": st.column_config.NumberColumn(
-                        "质检总分", format="%.1f"
-                    )
+                    "线索到店率": st.column_config.TextColumn("线索到店率"), # 强制作为文本显示，如 "5.2%"
+                    "质检总分": st.column_config.NumberColumn("质检总分", format="%.1f")
                 }
             )
 
         with c_right:
             st.markdown("### 💡 话术质量 vs 转化结果")
             plot_df = current_df.copy()
-            plot_df['转化率%'] = plot_df['线索到店率'] * 100
+            # 绘图还是得用数值
+            plot_df['转化率%'] = plot_df['线索到店率_数值'] * 100
             
             fig = px.scatter(
                 plot_df, 
@@ -217,7 +193,7 @@ if file_f and file_d and file_a:
                 size="线索量", 
                 color="质检总分",
                 hover_name="名称",
-                labels={"S_Time": scatter_x_label, "转化率%": "线索到店率(%)"},
+                labels={"S_Time": "明确到店得分", "转化率%": "线索到店率(%)"},
                 color_continuous_scale="Reds",
                 height=400
             )
@@ -230,7 +206,6 @@ if file_f and file_d and file_a:
         st.markdown("---")
         with st.container():
             st.markdown("### 🕵️‍♀️ 管家深度诊断")
-            
             if selected_store == "全部":
                 st.info("💡 请先在右上方选择具体【门店】，查看该门店下的顾问详细诊断。")
             else:
@@ -250,7 +225,8 @@ if file_f and file_d and file_a:
                         ))
                         fig_f.update_layout(showlegend=False, height=180, margin=dict(t=0,b=0,l=0,r=0))
                         st.plotly_chart(fig_f, use_container_width=True)
-                        st.metric("线索到店率", f"{p['线索到店率']:.1%}") 
+                        # 这里也直接用处理好的字符串
+                        st.metric("线索到店率", p['线索到店率']) 
                         st.caption(f"平均通话时长: {p['通话时长']:.1f} 秒")
 
                     with d2:
