@@ -4,9 +4,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 # ================= 1. 页面配置 =================
@@ -21,7 +18,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 安全锁、文件存储与邮件配置 =================
+# ================= 2. 安全锁与文件存储 =================
 ADMIN_PASSWORD = "AudiSARR3" 
 
 DATA_DIR = "data_store"
@@ -29,63 +26,11 @@ if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 PATH_F = os.path.join(DATA_DIR, "funnel.xlsx")      # 1. 漏斗
 PATH_D = os.path.join(DATA_DIR, "dcc.xlsx")         # 2. 顾问质检
 PATH_A = os.path.join(DATA_DIR, "ams.xlsx")         # 3. AMS
-PATH_S = os.path.join(DATA_DIR, "store_rank.csv")   # 4. 门店排名 (新增加)
-
-# 📧 邮件配置
-EMAIL_CONFIG = {
-    "smtp_server": "smtp.qq.com",        
-    "smtp_port": 465,                     
-    "sender_email": "your_email@qq.com", 
-    "password": "your_auth_code",        
-    "receiver_email": "boss_email@audi.com" 
-}
-
-# 🚨 异常阈值
-THRESHOLDS = {
-    "线索到店率": 0.03,   
-    "外呼接通率": 0.40,   
-    "DCC及时处理率": 0.90 
-}
+PATH_S = os.path.join(DATA_DIR, "store_rank.csv")   # 4. 门店排名
 
 def save_uploaded_file(uploaded_file, save_path):
-    # 简单的文件保存，如果是csv保存为csv，xlsx保存为xlsx
-    # 为了简化逻辑，这里不管上传的是什么后缀，都存到定义的路径下
-    # 读取时会自适应
     with open(save_path, "wb") as f: f.write(uploaded_file.getbuffer())
     return True
-
-# --- 📧 发送邮件函数 ---
-def send_alert_email(anomalies_df):
-    if anomalies_df.empty:
-        return False, "无异常数据"
-    try:
-        html_table = anomalies_df.to_html(index=False, border=1, classes='table table-striped')
-        html_content = f"""
-        <html>
-        <body>
-            <h2 style="color: #bb0a30;">🏎️ Audi DCC 效能异常预警</h2>
-            <p>系统在更新数据时检测到以下人员关键指标低于设定阈值，请关注：</p>
-            <p><b>检测时间：</b>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-            <br>
-            {html_table}
-            <br>
-            <p>请登录看板查看详细原因。</p>
-        </body>
-        </html>
-        """
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_CONFIG["sender_email"]
-        msg['To'] = EMAIL_CONFIG["receiver_email"]
-        msg['Subject'] = f"【预警】Audi DCC 异常指标监控日报 - {datetime.now().strftime('%m-%d')}"
-        msg.attach(MIMEText(html_content, 'html'))
-
-        server = smtplib.SMTP_SSL(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"])
-        server.login(EMAIL_CONFIG["sender_email"], EMAIL_CONFIG["password"])
-        server.sendmail(EMAIL_CONFIG["sender_email"], EMAIL_CONFIG["receiver_email"], msg.as_string())
-        server.quit()
-        return True, "邮件发送成功"
-    except Exception as e:
-        return False, f"邮件发送失败: {e}"
 
 # ================= 3. 侧边栏逻辑 =================
 with st.sidebar:
@@ -104,9 +49,7 @@ with st.sidebar:
             new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"])
             new_d = st.file_uploader("2. 顾问质检表", type=["xlsx", "csv"])
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"])
-            new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"]) # 新增
-            
-            enable_email = st.checkbox("📧 发现异常时发送邮件通知", value=True)
+            new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"]) 
             
             if st.button("🚀 确认更新数据"):
                 if new_f and new_d and new_a and new_s:
@@ -114,29 +57,8 @@ with st.sidebar:
                     save_uploaded_file(new_d, PATH_D)
                     save_uploaded_file(new_a, PATH_A)
                     save_uploaded_file(new_s, PATH_S)
-                    st.success("数据已保存！")
                     
-                    if enable_email:
-                        with st.spinner("正在扫描异常并发送邮件..."):
-                            try:
-                                df_check, _ = process_data(PATH_F, PATH_D, PATH_A, PATH_S)
-                                if df_check is not None:
-                                    mask_rate = df_check['线索到店率_数值'] < THRESHOLDS["线索到店率"]
-                                    mask_conn = df_check['外呼接通率'] < THRESHOLDS["外呼接通率"]
-                                    mask_timely = df_check['DCC及时处理率'] < THRESHOLDS["DCC及时处理率"]
-                                    abnormal_df = df_check[mask_rate | mask_conn | mask_timely].copy()
-                                    
-                                    if not abnormal_df.empty:
-                                        email_df = abnormal_df[['门店名称', '邀约专员/管家', '线索到店率', '外呼接通率', 'DCC及时处理率']].copy()
-                                        email_df['外呼接通率'] = (email_df['外呼接通率'] * 100).map('{:.1f}%'.format)
-                                        email_df['DCC及时处理率'] = (email_df['DCC及时处理率'] * 100).map('{:.1f}%'.format)
-                                        success, msg = send_alert_email(email_df)
-                                        if success: st.toast(f"📧 预警邮件已发送！发现 {len(email_df)} 名异常人员。", icon="🚨")
-                                        else: st.error(msg)
-                                    else: st.toast("👏 本次更新未发现异常指标。", icon="✅")
-                            except Exception as e: st.error(f"异常检测失败: {e}")
-
-                    st.success("更新完成，正在刷新...")
+                    st.success("数据已保存！正在刷新看板...")
                     st.rerun()
                 else: st.error("请传齐 4 个文件")
 
@@ -144,7 +66,6 @@ with st.sidebar:
 def smart_read(file_path, is_rank_file=False):
     """智能读取，支持csv/xlsx，针对排名表支持跳过首行"""
     try:
-        # 判断文件类型
         if isinstance(file_path, str):
             is_csv = file_path.endswith('.csv') or file_path.endswith('.txt')
         else:
@@ -155,15 +76,12 @@ def smart_read(file_path, is_rank_file=False):
         else:
             df = pd.read_excel(file_path)
             
-        # 针对门店排名表的特殊处理：如果第一列不是“排名”或“门店名称”，尝试读取第二行作为表头
+        # 针对门店排名表的特殊处理
         if is_rank_file:
             target_cols = ['门店名称', '质检总分', '排名']
             if not any(col in df.columns for col in target_cols):
-                # 尝试重新读取，跳过第一行 (header=1)
-                if is_csv:
-                    df = pd.read_csv(file_path, header=1)
-                else:
-                    df = pd.read_excel(file_path, header=1)
+                if is_csv: df = pd.read_csv(file_path, header=1)
+                else: df = pd.read_excel(file_path, header=1)
         return df
     except: return None
 
@@ -171,7 +89,6 @@ def clean_percent_col(df, col_name):
     if col_name not in df.columns: return
     series = df[col_name].astype(str).str.strip().str.replace('%', '', regex=False)
     numeric_series = pd.to_numeric(series, errors='coerce').fillna(0)
-    # 智能判断：如果最大值>1（比如85.5），视为百分制，除以100；否则视为小数
     if numeric_series.max() > 1.0:
         df[col_name] = numeric_series / 100
     else:
@@ -187,7 +104,7 @@ def process_data(path_f, path_d, path_a, path_s):
         raw_f = smart_read(path_f)
         raw_d = smart_read(path_d)
         raw_a = smart_read(path_a)
-        raw_s = smart_read(path_s, is_rank_file=True) # 专门处理排名表
+        raw_s = smart_read(path_s, is_rank_file=True)
         
         if raw_f is None or raw_d is None or raw_a is None or raw_s is None: return None, None
 
@@ -217,7 +134,6 @@ def process_data(path_f, path_d, path_a, path_s):
 
         # ================= B. DCC (顾问质检) =================
         wechat_col = '添加微信.1' if '添加微信.1' in raw_d.columns else '添加微信'
-        # 映射顾问质检表的列
         df_d = raw_d.rename(columns={
             '顾问名称': '邀约专员/管家', '质检总分': '质检总分',
             '60秒通话': 'S_60s', '用车需求': 'S_Needs', '车型信息': 'S_Car', 
@@ -230,27 +146,17 @@ def process_data(path_f, path_d, path_a, path_s):
             df_d[c] = pd.to_numeric(df_d[c], errors='coerce') 
         df_d = df_d[['邀约专员/管家'] + score_cols]
 
-        # ================= C. Store Scores (门店质检 - 新增) =================
-        # 处理从文件4直接读取的门店得分
-        # 需要映射列名以匹配后续绘图逻辑
-        # 假设文件列名为: 门店名称, 质检总分, 60秒通话, 明确到店时间...
+        # ================= C. Store Scores (门店质检) =================
         df_s = raw_s.rename(columns={
-            '60秒通话': 'S_60s', 
-            '用车需求': 'S_Needs', 
-            '车型信息': 'S_Car', 
-            '政策相关': 'S_Policy', 
-            '明确到店时间': 'S_Time'
+            '60秒通话': 'S_60s', '用车需求': 'S_Needs', '车型信息': 'S_Car', 
+            '政策相关': 'S_Policy', '明确到店时间': 'S_Time'
         })
-        # 处理可能重复的“添加微信”列
         s_wechat_col = '添加微信.1' if '添加微信.1' in raw_s.columns else '添加微信'
         df_s['S_Wechat'] = raw_s[s_wechat_col]
         
-        # 筛选核心列
         store_score_cols = ['门店名称', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']
-        # 仅保留存在的列
         available_store_cols = [c for c in store_score_cols if c in df_s.columns]
         df_s = df_s[available_store_cols]
-        # 确保数值化
         for c in available_store_cols:
             if c != '门店名称':
                 df_s[c] = pd.to_numeric(df_s[c], errors='coerce')
@@ -282,7 +188,6 @@ def process_data(path_f, path_d, path_a, path_s):
             if c not in df_a.columns: df_a[c] = 0
             else: df_a[c] = pd.to_numeric(df_a[c], errors='coerce').fillna(0)
 
-        # 个人层面的率计算
         df_a['外呼接通率'] = safe_div(df_a, 'conn_num', 'conn_denom')
         df_a['DCC及时处理率'] = safe_div(df_a, 'timely_num', 'timely_denom')
         df_a['DCC二次外呼率'] = safe_div(df_a, 'call2_num', 'call2_denom')
@@ -291,47 +196,39 @@ def process_data(path_f, path_d, path_a, path_s):
         final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率'] + all_ams_calc_cols
         df_a = df_a[final_ams_cols]
 
-        # ================= E. Merge (合并数据) =================
-        # 清理名称空格
+        # ================= E. Merge =================
         for df in [df_store_data, df_advisor_data, df_d, df_a, df_s]:
             if '邀约专员/管家' in df.columns: df['邀约专员/管家'] = df['邀约专员/管家'].astype(str).str.strip()
             if '门店名称' in df.columns: df['门店名称'] = df['门店名称'].astype(str).str.strip()
 
-        # 1. 生成顾问全量表 (Funnel + Quality + AMS)
+        # 1. 顾问全量表
         full_advisors = pd.merge(df_advisor_data, df_d, on='邀约专员/管家', how='left')
         full_advisors = pd.merge(full_advisors, df_a, on='邀约专员/管家', how='left')
         
         cols_to_fill_zero = ['线索量', '到店量', '通话时长'] + all_ams_calc_cols
         full_advisors[cols_to_fill_zero] = full_advisors[cols_to_fill_zero].fillna(0)
 
-        # 2. 生成门店全量表 (Funnel + Store Quality + Aggregated AMS)
-        # 步骤 2.1: 聚合 AMS 数据 (因为没有门店级AMS文件，需要从顾问加总)
+        # 2. 门店全量表
         ams_agg_dict = {
             'conn_num': 'sum', 'conn_denom': 'sum',
             'timely_num': 'sum', 'timely_denom': 'sum',
             'call2_num': 'sum', 'call2_denom': 'sum',
             'call3_num': 'sum', 'call3_denom': 'sum'
         }
-        # 将顾问数据按门店分组聚合AMS指标
         store_ams = full_advisors.groupby('门店名称').agg(ams_agg_dict).reset_index()
         
-        # 重新计算门店级 AMS 率
         store_ams['外呼接通率'] = safe_div(store_ams, 'conn_num', 'conn_denom')
         store_ams['DCC及时处理率'] = safe_div(store_ams, 'timely_num', 'timely_denom')
         store_ams['DCC二次外呼率'] = safe_div(store_ams, 'call2_num', 'call2_denom')
         store_ams['DCC三次外呼率'] = safe_div(store_ams, 'call3_num', 'call3_denom')
 
-        # 步骤 2.2: 合并所有门店数据
-        # 基准：df_store_data (漏斗) -> Merge df_s (质检文件直接读取) -> Merge store_ams (计算得来)
-        full_stores = pd.merge(df_store_data, df_s, on='门店名称', how='left') # 这里直接用文件里的分，不再agg mean
+        full_stores = pd.merge(df_store_data, df_s, on='门店名称', how='left')
         full_stores = pd.merge(full_stores, store_ams, on='门店名称', how='left')
         
         return full_advisors, full_stores
 
     except Exception as e:
         st.error(f"处理出错: {e}")
-        import traceback
-        st.text(traceback.format_exc())
         return None, None
 
 # ================= 5. 界面渲染 =================
@@ -352,11 +249,9 @@ if has_data:
             current_df = df_stores.copy()
             current_df['名称'] = current_df['门店名称']
             rank_title = "🏆 全区门店排名"
-            # 聚合 KPI
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             kpi_rate = kpi_visits / kpi_leads if kpi_leads > 0 else 0
-            # 门店视图下，质检总分直接取列的平均（因为已经是门店分了，再算平均代表全区水平）
             kpi_score = current_df['质检总分'].mean() 
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
@@ -380,7 +275,6 @@ if has_data:
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
         
         p1, p2, p3, p4 = st.columns(4)
-        # 使用加权平均计算 KPI (sum/sum)
         def calc_kpi_rate(df, num, denom):
             total_num = df[num].sum()
             total_denom = df[denom].sum()
