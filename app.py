@@ -16,7 +16,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 2. 侧边栏上传 =================
+# ================= 2. 侧边栏 =================
 with st.sidebar:
     st.header("📂 数据上传")
     file_f = st.file_uploader("1. 漏斗指标表 (含小计行)", type=["xlsx", "csv"])
@@ -42,40 +42,37 @@ def process_data(f_file, d_file, a_file):
         # 1. 找列名
         store_col = next((c for c in raw_f.columns if '代理商' in str(c) or '门店' in str(c)), raw_f.columns[0])
         name_col = next((c for c in raw_f.columns if '管家' in str(c) or '顾问' in str(c)), raw_f.columns[1])
-        # 找核心数据列
         col_leads = '线上_有效线索数' if '线上_有效线索数' in raw_f.columns else '线索量'
         col_visits = '线上_到店数' if '线上_到店数' in raw_f.columns else '到店量'
-        # 【关键】找 Excel 自带的率
+        
+        # 【关键修正】直接锁定原始率列 (线上_有效线索到店率)
         col_excel_rate = next((c for c in raw_f.columns if '率' in str(c) and ('到店' in str(c) or '有效' in str(c))), None)
 
         # 重命名
         rename_dict = {store_col: '门店名称', name_col: '邀约专员/管家', col_leads: '线索量', col_visits: '到店量'}
-        if col_excel_rate: rename_dict[col_excel_rate] = 'Excel_Rate' # 标记为权威率
+        if col_excel_rate: rename_dict[col_excel_rate] = '原始到店率' # 标记一下
         
         df_f = raw_f.rename(columns=rename_dict)
         
-        # 2. 区分 门店行(小计) 和 个人行
-        # 提取包含“小计”的行 -> 这就是门店排名的依据，完全不计算，直接拿
+        # 2. 分离数据
+        # 提取门店行 (小计)
         df_store_data = df_f[df_f['邀约专员/管家'].astype(str).str.contains('小计', na=False)].copy()
         
-        # 提取个人行
+        # 提取顾问行 (非小计、非总计、非-)
         df_advisor_data = df_f[~df_f['邀约专员/管家'].astype(str).str.contains('计|-', na=False)].copy()
 
-        # 3. 清洗数据类型
+        # 3. 数值清洗
         for df in [df_store_data, df_advisor_data]:
             df['线索量'] = pd.to_numeric(df['线索量'], errors='coerce').fillna(0)
             df['到店量'] = pd.to_numeric(df['到店量'], errors='coerce').fillna(0)
             
             # 【绝对核心】：直接使用 Excel 里的率
-            if 'Excel_Rate' in df.columns:
-                df['Excel_Rate'] = pd.to_numeric(df['Excel_Rate'], errors='coerce').fillna(0)
-                # 判断是否需要除以100 (如果原数据是 5.2 代表 5.2%，则不动；如果是 0.052，也不动，后续由 column_config 格式化)
-                # 通常 progress_column 需要 0-1 之间的小数
-                # 简单判断：如果最大值大于1，说明是百分数(如5.2)，除以100；否则是小数(0.05)
-                if df['Excel_Rate'].max() > 1.0:
-                    df['线索到店率'] = df['Excel_Rate'] / 100
-                else:
-                    df['线索到店率'] = df['Excel_Rate']
+            if '原始到店率' in df.columns:
+                # 尝试转数字
+                df['原始到店率'] = pd.to_numeric(df['原始到店率'], errors='coerce').fillna(0)
+                # 只有当数据明显是小数(如0.05)时，我们在展示时会格式化为百分比
+                # 这里不做额外除法，直接信赖 Excel 的值
+                df['线索到店率'] = df['原始到店率']
             else:
                 # 只有万一没这一列，才自己算
                 df['线索到店率'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
@@ -143,13 +140,14 @@ if file_f and file_d and file_a:
             # === 全区模式 (直接展示 df_stores 即小计行) ===
             # 这里的数据就是 Excel 里的行，绝对准确
             current_df = df_stores
-            rank_title = "🏆 全区门店排名 (源自报表小计)"
+            rank_title = "🏆 全区门店排名"
             name_col_show = "门店名称"
             scatter_x_label = "门店平均明确到店分"
             
             # KPI (求和大盘)
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
+            # 大盘的总转化率还是得算一下，因为Excel没有“总计”行的数据
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = df_advisors['质检总分'].mean()
@@ -164,6 +162,7 @@ if file_f and file_d and file_a:
             # KPI
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
+            # 单店的总转化率，如果有小计行直接取；这里暂用累加求和
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
             else: kpi_rate = 0
             kpi_score = current_df['质检总分'].mean()
