@@ -18,7 +18,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= 2. 安全锁与文件存储 =================
-# 【修改点】密码已更新
 ADMIN_PASSWORD = "AudiSARR3" 
 
 DATA_DIR = "data_store"
@@ -76,6 +75,13 @@ def clean_percent_col(df, col_name):
     else:
         df[col_name] = numeric_series
 
+# --- 新增：安全除法函数 ---
+def safe_div(df, num_col, denom_col):
+    """计算两列相除，处理分母为0的情况"""
+    num = pd.to_numeric(df[num_col], errors='coerce').fillna(0)
+    denom = pd.to_numeric(df[denom_col], errors='coerce').fillna(0)
+    return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
+
 def process_data(path_f, path_d, path_a):
     try:
         raw_f = smart_read(path_f)
@@ -104,7 +110,7 @@ def process_data(path_f, path_d, path_a):
                 clean_percent_col(df, 'Excel_Rate')
                 df['线索到店率_数值'] = df['Excel_Rate']
             else:
-                df['线索到店率_数值'] = (df['到店量'] / df['线索量']).replace([np.inf, -np.inf], 0).fillna(0)
+                df['线索到店率_数值'] = safe_div(df, '到店量', '线索量')
             df['线索到店率'] = (df['线索到店率_数值'] * 100).map('{:.1f}%'.format)
 
         # --- B. DCC ---
@@ -117,27 +123,51 @@ def process_data(path_f, path_d, path_a):
         df_d['S_Wechat'] = raw_d[wechat_col]
         df_d = df_d[['邀约专员/管家', '质检总分', 'S_60s', 'S_Needs', 'S_Car', 'S_Policy', 'S_Wechat', 'S_Time']]
 
-        # --- C. AMS ---
-        ams_cols = {
-            '管家姓名': '邀约专员/管家', 'DCC平均通话时长': '通话时长',
-            '外呼接通率': '外呼接通率', 'DCC及时处理率': 'DCC及时处理率',
-            'DCC二次外呼率': 'DCC二次外呼率', 'DCC三次外呼率': 'DCC三次外呼率'
+        # --- C. AMS (核心修正：基于分子分母计算) ---
+        
+        # 1. 定义需要的原始列名 (和代码内部列名的映射)
+        # 格式： 'Excel里的列名片段': '代码里用的临时名'
+        raw_cols_mapping = {
+            '管家姓名': '邀约专员/管家', 
+            'DCC平均通话时长': '通话时长',
+            # 接通率相关
+            'DCC接通线索数': 'conn_num',
+            'DCC外呼线索数': 'conn_denom',
+            # 及时处理率相关
+            'DCC及时处理线索': 'timely_num',
+            '需外呼线索数': 'timely_denom',
+            # 二呼率相关
+            '二次外呼线索数': 'call2_num',
+            '需再呼线索数': 'call2_denom',
+            # 三呼率相关
+            'DCC三次外呼的线索数': 'call3_num',
+            'DCC二呼状态为需再呼的线索数': 'call3_denom'
         }
-        ams_rename_map = {}
-        for key, target in ams_cols.items():
-            found_col = next((c for c in raw_a.columns if key in str(c).strip()), None)
-            if found_col: ams_rename_map[found_col] = target
-        
-        df_a = raw_a.rename(columns=ams_rename_map)
-        
-        req_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']
-        for c in req_ams_cols:
-            if c not in df_a.columns: df_a[c] = 0
-        
-        for c in ['外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']:
-            clean_percent_col(df_a, c)
 
-        df_a = df_a[req_ams_cols]
+        # 2. 智能重命名 (模糊匹配)
+        found_rename_map = {}
+        for raw_key, target in raw_cols_mapping.items():
+            # 在 raw_a.columns 里找包含 raw_key 的列
+            found = next((c for c in raw_a.columns if raw_key in str(c).strip()), None)
+            if found:
+                found_rename_map[found] = target
+        
+        df_a = raw_a.rename(columns=found_rename_map)
+        
+        # 3. 确保所有需要的列都存在，不存在则补0
+        needed_cols = list(raw_cols_mapping.values())
+        for c in needed_cols:
+            if c not in df_a.columns: df_a[c] = 0
+            
+        # 4. 【关键步骤】执行除法计算
+        df_a['外呼接通率'] = safe_div(df_a, 'conn_num', 'conn_denom')
+        df_a['DCC及时处理率'] = safe_div(df_a, 'timely_num', 'timely_denom')
+        df_a['DCC二次外呼率'] = safe_div(df_a, 'call2_num', 'call2_denom')
+        df_a['DCC三次外呼率'] = safe_div(df_a, 'call3_num', 'call3_denom')
+
+        # 只保留最终计算结果和关键信息
+        final_ams_cols = ['邀约专员/管家', '通话时长', '外呼接通率', 'DCC及时处理率', 'DCC二次外呼率', 'DCC三次外呼率']
+        df_a = df_a[final_ams_cols]
 
         # --- D. Strip & Merge ---
         for df in [df_store_data, df_advisor_data, df_d, df_a]:
@@ -189,7 +219,7 @@ if has_data:
         else:
             current_df = df_advisors[df_advisors['门店名称'] == selected_store].copy()
             current_df['名称'] = current_df['邀约专员/管家']
-            rank_title = f"👤 {selected_store} - DCC/管家排名"
+            rank_title = f"👤 {selected_store} - 顾问排名"
             kpi_leads = current_df['线索量'].sum()
             kpi_visits = current_df['到店量'].sum()
             if kpi_leads > 0: kpi_rate = kpi_visits / kpi_leads
@@ -220,13 +250,12 @@ if has_data:
         p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         
-        st.caption("注：以上为当前筛选范围内的平均值")
+        st.caption("注：以上为当前筛选范围内的平均值 (计算方式：分子之和/分母之和 或 平均值)")
 
         # 2.2 关联图表
         c_proc_1, c_proc_2 = st.columns(2)
         
         with c_proc_1:
-            # 【修改点】标题改了
             st.markdown("#### 🕵️ 异常侦测：DCC外呼接通率 vs 60秒通话占比")
             st.info("💡 **分析逻辑：** 右下角（接通率高但60秒占比低）代表可能存在“人为压低时长/话术差”问题。")
             
@@ -245,7 +274,6 @@ if has_data:
             fig_p1.add_hline(y=current_df['S_60s'].mean(), line_dash="dash", line_color="gray")
             fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
 
-            # 【修改点】左图 hovertemplate
             fig_p1.update_traces(
                 customdata=np.stack((
                     current_df['线索量'], 
@@ -257,7 +285,7 @@ if has_data:
                     "<b>%{hovertext}</b><br><br>" +
                     "线索量: %{customdata[0]:,}<br>" +
                     "外呼接通率: %{customdata[1]:.1%}<br>" +
-                    "60秒通话占比得分: %{customdata[2]:.0f}<br>" + # 整数
+                    "60秒通话占比得分: %{customdata[2]:.0f}<br>" + 
                     "质检总分: %{customdata[3]:.1f}<br>" +
                     "<extra></extra>"
                 )
@@ -265,7 +293,6 @@ if has_data:
             st.plotly_chart(fig_p1, use_container_width=True)
 
         with c_proc_2:
-            # 【修改点】标题改了
             st.markdown("#### 🔗 归因分析：过程指标 vs 线索首邀到店率")
             st.info("💡 **分析逻辑：** 监控外呼及时性与邀约到店率相关性。")
             
@@ -287,7 +314,6 @@ if has_data:
             )
             fig_p2.update_layout(xaxis=dict(tickformat=".0%"))
 
-            # 【修改点】右图 hovertemplate (非常全)
             fig_p2.update_traces(
                 customdata=np.stack((
                     plot_df_corr['线索量'], 
@@ -377,7 +403,7 @@ if has_data:
         with st.container():
             st.markdown("### 🕵️‍♀️ 邀约专员/管家深度诊断")
             if selected_store == "全部":
-                st.info("💡 请先在右上方选择具体【门店】，查看该门店下的DCC/管家详细诊断。")
+                st.info("💡 请先在右上方选择具体【门店】，查看该门店下的顾问详细诊断。")
             else:
                 diag_list = sorted(current_df['邀约专员/管家'].unique())
                 if len(diag_list) > 0:
@@ -433,4 +459,3 @@ if has_data:
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传文件。")
-
