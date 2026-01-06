@@ -191,3 +191,88 @@ if file_f and file_d and file_a:
                     ),
                     "质检总分": st.column_config.NumberColumn(
                         "质检总分",
+                        format="%.1f"
+                    )
+                }
+            )
+
+        with c_right:
+            st.markdown("### 💡 明确到店时间 vs 最终结果")
+            # 散点图
+            df_display['转化率_百分比'] = df_display['线索到店率'] * 100 # 转换成 0-100 用于绘图
+            fig = px.scatter(
+                df_display, x="S_Time", y="转化率_百分比",
+                size="线索量", color="质检总分",
+                hover_name="邀约专员/管家",
+                labels={"S_Time": "明确到店话术得分", "转化率_百分比": "线索到店率(%)"},
+                color_continuous_scale="Reds",
+                height=350
+            )
+            fig.add_vline(x=df_display['S_Time'].mean(), line_dash="dash", line_color="gray")
+            fig.add_hline(y=avg_rate_global * 100, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # --- 底部诊断 ---
+        st.markdown("---")
+        with st.container():
+            st.markdown("### 🕵️‍♀️ 管家深度诊断")
+            
+            advisors = df_display['邀约专员/管家'].unique()
+            if len(advisors) > 0:
+                selected_advisor = st.selectbox("请选择要诊断的顾问:", advisors)
+                
+                p = df_display[df_display['邀约专员/管家'] == selected_advisor].iloc[0]
+                
+                d1, d2, d3 = st.columns([1, 1, 1.2])
+                
+                with d1:
+                    st.caption("转化漏斗 (RESULT)")
+                    fig_funnel = go.Figure(go.Funnel(
+                        y = ["线索量", "到店量"],
+                        x = [p['线索量'], p['到店量']],
+                        textinfo = "value+percent initial",
+                        marker = {"color": ["#d9d9d9", "#bb0a30"]}
+                    ))
+                    fig_funnel.update_layout(showlegend=False, height=200, margin=dict(t=0,b=0,l=0,r=0))
+                    st.plotly_chart(fig_funnel, use_container_width=True)
+                    st.metric("线索到店率", f"{p['线索到店率']:.1%}")
+                    st.caption(f"平均通话时长: {p['通话时长']:.1f} 秒")
+
+                with d2:
+                    st.caption("质检得分详情 (QUALITY)")
+                    metrics = {
+                        "明确到店时间 (核心)": p['S_Time'],
+                        "60秒通话占比 (基石)": p['S_60s'],
+                        "车型信息介绍": p['S_Car'],
+                        "政策相关话术": p['S_Policy'],
+                        "添加微信": p['S_Wechat']
+                    }
+                    for label, score in metrics.items():
+                        st.text(f"{label}")
+                        st.progress(min(score/100, 1.0))
+                        st.caption(f"得分: {score:.1f}")
+
+                with d3:
+                    with st.container():
+                        st.error("🤖 AI 智能诊断建议")
+                        issues = []
+                        if p['S_Time'] < 60:
+                            st.markdown(f"🔴 **致命短板：明确到店时间 (得分{p['S_Time']:.1f})**")
+                            st.markdown("未引导客户确认具体到店时间。建议使用二选一法。")
+                            issues.append(1)
+                        if p['S_60s'] < 60:
+                            st.markdown(f"🟠 **基石不稳：60秒占比 (得分{p['S_60s']:.1f})**")
+                            st.markdown("客户挂断过快。建议优化开场白利益点。")
+                            issues.append(1)
+                        if p['S_Wechat'] < 80:
+                            st.markdown(f"🟠 **私域缺失：添加微信 (得分{p['S_Wechat']:.1f})**")
+                            st.markdown("建议发送定位或配置表为由加微。")
+                            issues.append(1)
+                        if not issues:
+                            st.success("该顾问表现优秀，核心指标健康。")
+            else:
+                st.info("该门店下暂无顾问数据。")
+    else:
+        st.warning("数据无法解析，请检查上传文件是否为空或格式已变更。")
+else:
+    st.info("👈 请在左侧上传三个文件")
