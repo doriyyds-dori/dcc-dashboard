@@ -268,7 +268,18 @@ def safe_div(df: pd.DataFrame, num_col: str, denom_col: str):
     return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
 
 
-# ✅ 功能1：修复 AMS 数值全 0（清理逗号千分位/空格/% 等）
+# ✅ 新增：容错取列名（处理 conn_num__1 之类的情况）
+def _pick_col_like(df: pd.DataFrame, base: str):
+    """优先返回 base；否则返回 base__1 / base__2 ... 中第一个匹配的列名。"""
+    if base in df.columns:
+        return base
+    for c in df.columns:
+        if str(c).startswith(base + "__"):
+            return c
+    return None
+
+
+# ✅ 修复 AMS 数值全 0（清理逗号千分位/空格/% 等）
 def _to_1d_numeric(x):
     """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。
     额外增强：清理逗号千分位、空格、百分号等，避免 to_numeric 全部变 NaN -> 0。
@@ -523,7 +534,7 @@ def process_data(path_f, path_d, path_a, path_s):
             df_a["通话时长"] = 0
         df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
 
-        # ✅ 功能2：AMS 求和自检（转换后），不影响计算
+        # ✅ AMS 求和自检（转换后），不影响计算
         try:
             st.session_state["_ams_sum_debug"] = {
                 c: float(pd.to_numeric(df_a[c], errors="coerce").fillna(0).sum()) for c in all_ams_calc_cols
@@ -815,11 +826,14 @@ if has_data:
         st.markdown("---")
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
 
+        # ✅ 修复：KPI 计算时容错识别 conn_num__1 等列名
         def calc_kpi_rate(df, num, denom):
-            if num not in df.columns or denom not in df.columns:
+            num_col = _pick_col_like(df, num)
+            denom_col = _pick_col_like(df, denom)
+            if not num_col or not denom_col:
                 return 0
-            total_num = pd.to_numeric(df[num], errors="coerce").fillna(0).sum()
-            total_denom = pd.to_numeric(df[denom], errors="coerce").fillna(0).sum()
+            total_num = pd.to_numeric(df[num_col], errors="coerce").fillna(0).sum()
+            total_denom = pd.to_numeric(df[denom_col], errors="coerce").fillna(0).sum()
             return total_num / total_denom if total_denom > 0 else 0
 
         p1, p2, p3, p4 = st.columns(4)
@@ -827,6 +841,20 @@ if has_data:
         avg_timely = calc_kpi_rate(current_df, "timely_num", "timely_denom")
         avg_call2 = calc_kpi_rate(current_df, "call2_num", "call2_denom")
         avg_call3 = calc_kpi_rate(current_df, "call3_num", "call3_denom")
+
+        # ✅ 当前视图AMS求和自检（不影响功能）
+        try:
+            _cn = _pick_col_like(current_df, "conn_num")
+            _cd = _pick_col_like(current_df, "conn_denom")
+            if _cn and _cd:
+                st.caption(
+                    f"📌 当前视图AMS求和：conn_num={pd.to_numeric(current_df[_cn], errors='coerce').fillna(0).sum():.0f} / "
+                    f"conn_denom={pd.to_numeric(current_df[_cd], errors='coerce').fillna(0).sum():.0f} ｜ 列名：{_cn},{_cd}"
+                )
+            else:
+                st.caption("📌 当前视图AMS求和：未找到 conn_num/conn_denom 列（可能被改名或未合并进当前视图）")
+        except Exception:
+            pass
 
         p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
         p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
