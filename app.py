@@ -36,16 +36,20 @@ PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
 PATH_S_XLSX = os.path.join(DATA_DIR, "store_rank.xlsx")
 PATH_S_CSV = os.path.join(DATA_DIR, "store_rank.csv")
 
-# ✅ 5) 门店归属维表（区域经理/省份/城市/门店名称）
-STORE_MAP_PATH = "/mnt/data/代理商名称归属.xlsx"   # 你已上传到这个路径
+# ✅ 5) 门店归属维表：网页端上传后保存到 data_store（一次上传，后续自动读取）
+PATH_M = os.path.join(DATA_DIR, "store_map.xlsx")
+# 兼容：如果你确实在服务器本地也放了一个固定路径文件，可以作为兜底（可选）
+STORE_MAP_FALLBACK = "/mnt/data/代理商名称归属.xlsx"
 
 
 def get_store_map_df():
     """读取门店归属表；若不存在或列不齐，返回 None（自动回退到旧的门店下拉）。"""
-    if not os.path.exists(STORE_MAP_PATH):
+    map_path = PATH_M if os.path.exists(PATH_M) else (STORE_MAP_FALLBACK if os.path.exists(STORE_MAP_FALLBACK) else None)
+    if not map_path:
         return None
+
     try:
-        m = pd.read_excel(STORE_MAP_PATH)
+        m = pd.read_excel(map_path)
         m.columns = m.columns.astype(str).str.strip()
 
         # 兼容：有些文件用“商务经理”而不是“区域经理”
@@ -318,13 +322,11 @@ def process_data(path_f, path_d, path_a, path_s):
             df["线索到店率"] = (df["线索到店率_数值"] * 100).map("{:.1f}%".format)
 
         # ✅ 防止和门店排名表的质检列重名导致 merge 生成 _x/_y：
-        # 门店维度的质检分数全部来自 df_s（门店排名表），漏斗小计里若存在同名列则丢弃。
         store_qc_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
 
         # ================= B. DCC (顾问质检) =================
         df_d = raw_d.rename(
-
             columns={
                 "顾问名称": "邀约专员/管家",
                 "管家": "邀约专员/管家",
@@ -337,10 +339,8 @@ def process_data(path_f, path_d, path_a, path_s):
             }
         )
 
-        # 防止 rename 后出现重复列名（避免 df['邀约专员/管家'] / df['门店名称'] 变成 DataFrame）
         df_d.columns = dedupe_columns(df_d.columns)
 
-        # 添加微信：可能重复列名，取第一列
         wechat_cols = [c for c in df_d.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
         if wechat_cols:
             df_d["S_Wechat"] = _to_1d_numeric(df_d[wechat_cols])
@@ -356,9 +356,6 @@ def process_data(path_f, path_d, path_a, path_s):
         df_d = df_d[["邀约专员/管家"] + [c for c in score_cols if c in df_d.columns]]
 
         # ================= C. Store Scores (门店质检) =================
-        # ⚠️ 规则：门店维度的所有“质检得分”必须【直接取自门店排名表】(raw_s)，不做任何二次计算/聚合。
-
-        # 1) 先统一列名（用“关键词找列”，避免源表列名微调导致取不到）
         def pick_col_by_keywords(df: pd.DataFrame, must_have_any, must_have_all=None, exclude=None):
             must_have_all = must_have_all or []
             exclude = exclude or []
@@ -368,7 +365,6 @@ def process_data(path_f, path_d, path_a, path_s):
                     return c
             return None
 
-        # 门店名称列（可能出现多列：门店名称/门店/门店名称__1...）
         store_name_candidates = [c for c in raw_s.columns if ("门店" in str(c)) and ("ID" not in str(c)) and ("编号" not in str(c))]
         if store_name_candidates:
             tmp = raw_s[store_name_candidates]
@@ -385,54 +381,24 @@ def process_data(path_f, path_d, path_a, path_s):
         col_needs = pick_col_by_keywords(raw_s, ["用车需求"], exclude=[])
         col_car = pick_col_by_keywords(raw_s, ["车型信息"], exclude=[])
         col_policy = pick_col_by_keywords(raw_s, ["政策"], exclude=[])
-        col_time = pick_col_by_keywords(raw_s, ["明确到店" , "到店时间"], exclude=[])
+        col_time = pick_col_by_keywords(raw_s, ["明确到店", "到店时间"], exclude=[])
         col_wechat = pick_col_by_keywords(raw_s, ["添加微信", "加微信", "加微"], exclude=[])
 
-        # 2) 组装门店质检表（全部加 SR_ 前缀，防止 merge 后被覆盖/变 _x/_y）
         df_s = pd.DataFrame({"门店名称": store_name})
 
-        if col_total and col_total in raw_s.columns:
-            df_s["SR_质检总分"] = _to_1d_numeric(raw_s[col_total])
-        else:
-            df_s["SR_质检总分"] = np.nan
+        df_s["SR_质检总分"] = _to_1d_numeric(raw_s[col_total]) if (col_total and col_total in raw_s.columns) else np.nan
+        df_s["SR_S_60s"] = _to_1d_numeric(raw_s[col_60s]) if (col_60s and col_60s in raw_s.columns) else np.nan
+        df_s["SR_S_Needs"] = _to_1d_numeric(raw_s[col_needs]) if (col_needs and col_needs in raw_s.columns) else np.nan
+        df_s["SR_S_Car"] = _to_1d_numeric(raw_s[col_car]) if (col_car and col_car in raw_s.columns) else np.nan
+        df_s["SR_S_Policy"] = _to_1d_numeric(raw_s[col_policy]) if (col_policy and col_policy in raw_s.columns) else np.nan
+        df_s["SR_S_Wechat"] = _to_1d_numeric(raw_s[col_wechat]) if (col_wechat and col_wechat in raw_s.columns) else np.nan
+        df_s["SR_S_Time"] = _to_1d_numeric(raw_s[col_time]) if (col_time and col_time in raw_s.columns) else np.nan
 
-        if col_60s and col_60s in raw_s.columns:
-            df_s["SR_S_60s"] = _to_1d_numeric(raw_s[col_60s])
-        else:
-            df_s["SR_S_60s"] = np.nan
-
-        if col_needs and col_needs in raw_s.columns:
-            df_s["SR_S_Needs"] = _to_1d_numeric(raw_s[col_needs])
-        else:
-            df_s["SR_S_Needs"] = np.nan
-
-        if col_car and col_car in raw_s.columns:
-            df_s["SR_S_Car"] = _to_1d_numeric(raw_s[col_car])
-        else:
-            df_s["SR_S_Car"] = np.nan
-
-        if col_policy and col_policy in raw_s.columns:
-            df_s["SR_S_Policy"] = _to_1d_numeric(raw_s[col_policy])
-        else:
-            df_s["SR_S_Policy"] = np.nan
-
-        if col_wechat and col_wechat in raw_s.columns:
-            df_s["SR_S_Wechat"] = _to_1d_numeric(raw_s[col_wechat])
-        else:
-            df_s["SR_S_Wechat"] = np.nan
-
-        if col_time and col_time in raw_s.columns:
-            df_s["SR_S_Time"] = _to_1d_numeric(raw_s[col_time])
-        else:
-            df_s["SR_S_Time"] = np.nan
-
-        # 3) 清理：空门店、重复门店（保留第一条）
         df_s["门店名称"] = df_s["门店名称"].astype(str).str.strip()
         df_s = df_s[df_s["门店名称"].ne("")].copy()
         df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
 
         # ================= D. AMS (跟进数据) =================
-        # 你原来的 cols_config 思路保留，但修复“未接通误命中/重复列导致 DataFrame”
         cols_config = [
             (["管家姓名", "顾问姓名", "顾问名称", "管家"], "邀约专员/管家", []),
             (["DCC平均通话时长", "平均通话时长"], "通话时长", []),
@@ -446,7 +412,6 @@ def process_data(path_f, path_d, path_a, path_s):
             (["DCC二呼状态为需再呼的线索数", "二呼状态为需再呼", "三次外呼分母"], "call3_denom", []),
         ]
 
-        # 目标名 -> 源列（只取一个，避免重复）
         target_to_src = {}
         for any_kw, target_name, exclude_kw in cols_config:
             if target_name in target_to_src:
@@ -463,16 +428,7 @@ def process_data(path_f, path_d, path_a, path_s):
         rename_map = {src: tgt for tgt, src in target_to_src.items()}
         df_a = raw_a.rename(columns=rename_map)
 
-        all_ams_calc_cols = [
-            "conn_num",
-            "conn_denom",
-            "timely_num",
-            "timely_denom",
-            "call2_num",
-            "call2_denom",
-            "call3_num",
-            "call3_denom",
-        ]
+        all_ams_calc_cols = ["conn_num", "conn_denom", "timely_num", "timely_denom", "call2_num", "call2_denom", "call3_num", "call3_denom"]
 
         if "邀约专员/管家" not in df_a.columns:
             df_a["邀约专员/管家"] = ""
@@ -486,16 +442,12 @@ def process_data(path_f, path_d, path_a, path_s):
             df_a["通话时长"] = 0
         df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
 
-        # 个人层面的率计算
         df_a["外呼接通率"] = safe_div(df_a, "conn_num", "conn_denom")
         df_a["DCC及时处理率"] = safe_div(df_a, "timely_num", "timely_denom")
         df_a["DCC二次外呼率"] = safe_div(df_a, "call2_num", "call2_denom")
         df_a["DCC三次外呼率"] = safe_div(df_a, "call3_num", "call3_denom")
 
-        final_ams_cols = (
-            ["邀约专员/管家", "通话时长", "外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"]
-            + all_ams_calc_cols
-        )
+        final_ams_cols = ["邀约专员/管家", "通话时长", "外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"] + all_ams_calc_cols
         final_ams_cols = [c for c in final_ams_cols if c in df_a.columns]
         df_a = df_a[final_ams_cols]
 
@@ -510,7 +462,6 @@ def process_data(path_f, path_d, path_a, path_s):
                 if s2 is not None:
                     df["门店名称"] = s2.astype(str).str.strip()
 
-        # 1) 顾问全量表
         full_advisors = pd.merge(df_advisor_data, df_d, on="邀约专员/管家", how="left")
         full_advisors = pd.merge(full_advisors, df_a, on="邀约专员/管家", how="left")
 
@@ -519,26 +470,21 @@ def process_data(path_f, path_d, path_a, path_s):
             if c in full_advisors.columns:
                 full_advisors[c] = pd.to_numeric(full_advisors[c], errors="coerce").fillna(0)
 
-        # 2) 门店全量表：从顾问加总 AMS
         ams_agg_dict = {c: "sum" for c in all_ams_calc_cols}
         if "门店名称" in full_advisors.columns and all(c in full_advisors.columns for c in all_ams_calc_cols):
             store_ams = full_advisors.groupby("门店名称").agg(ams_agg_dict).reset_index()
         else:
             store_ams = pd.DataFrame(columns=["门店名称"] + all_ams_calc_cols)
 
-        # 门店级率
         if not store_ams.empty:
             store_ams["外呼接通率"] = safe_div(store_ams, "conn_num", "conn_denom")
             store_ams["DCC及时处理率"] = safe_div(store_ams, "timely_num", "timely_denom")
             store_ams["DCC二次外呼率"] = safe_div(store_ams, "call2_num", "call2_denom")
             store_ams["DCC三次外呼率"] = safe_div(store_ams, "call3_num", "call3_denom")
 
-        # 门店层：漏斗(小计) + 门店排名表质检分 + 门店AMS加总
-        # ⚠️ 关键：门店质检列只认 df_s（SR_ 前缀），merge 后再“落回”标准列名，确保绝对来自门店排名表。
         full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
         full_stores = pd.merge(full_stores, store_ams, on="门店名称", how="left")
 
-        # 从 SR_ 字段回填标准字段（保证门店图表读取到的是门店排名表的原值）
         full_stores["质检总分"] = full_stores.get("SR_质检总分")
         full_stores["S_60s"] = full_stores.get("SR_S_60s")
         full_stores["S_Needs"] = full_stores.get("SR_S_Needs")
@@ -547,10 +493,7 @@ def process_data(path_f, path_d, path_a, path_s):
         full_stores["S_Wechat"] = full_stores.get("SR_S_Wechat")
         full_stores["S_Time"] = full_stores.get("SR_S_Time")
 
-        # 清理 SR_ 临时列（避免后续误用）
         full_stores.drop(columns=[c for c in full_stores.columns if str(c).startswith("SR_")], inplace=True, errors="ignore")
-
-        # 再兜底一次：确保列名唯一
         full_stores.columns = dedupe_columns(full_stores.columns)
 
         return full_advisors, full_stores
@@ -558,7 +501,6 @@ def process_data(path_f, path_d, path_a, path_s):
     except Exception as e:
         st.error(f"处理出错: {e}")
         import traceback
-
         st.text(traceback.format_exc())
         return None, None
 
@@ -585,7 +527,8 @@ with st.sidebar:
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"], key="up_a")
             new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"], key="up_s")
 
-            # ✅ 已取消：异常邮件功能（避免环境/账号配置导致更新失败）
+            # ✅ 新增：归属表上传（一次上传后持久化到 data_store）
+            new_m = st.file_uploader("5. 代理商名称归属(区域经理/省份/城市/门店)", type=["xlsx"], key="up_m")
 
             if st.button("🚀 确认更新数据"):
                 if new_f and new_d and new_a and new_s:
@@ -596,7 +539,6 @@ with st.sidebar:
 
                         # 门店排名：按真实后缀保存，避免 xlsx 被误存为 csv 造成乱码
                         if str(new_s.name).lower().endswith(".xlsx"):
-                            # 删除旧 csv（如果存在）
                             if os.path.exists(PATH_S_CSV):
                                 try:
                                     os.remove(PATH_S_CSV)
@@ -604,13 +546,16 @@ with st.sidebar:
                                     pass
                             save_uploaded_file(new_s, PATH_S_XLSX)
                         else:
-                            # 删除旧 xlsx（如果存在）
                             if os.path.exists(PATH_S_XLSX):
                                 try:
                                     os.remove(PATH_S_XLSX)
                                 except Exception:
                                     pass
                             save_uploaded_file(new_s, PATH_S_CSV)
+
+                        # ✅ 归属表：可选上传（不影响原4表更新）
+                        if new_m is not None:
+                            save_uploaded_file(new_m, PATH_M)
 
                         # ✅ 写入“最新一次上传数据报时间”
                         try:
@@ -622,7 +567,7 @@ with st.sidebar:
                     st.success("更新完成，正在刷新...")
                     st.rerun()
                 else:
-                    st.error("请传齐 4 个文件")
+                    st.error("请传齐 4 个文件（归属表第5项可选）")
 
 
 # ================= 5. 界面渲染 =================
@@ -651,48 +596,43 @@ if has_data:
                 unsafe_allow_html=True,
             )
 
-        # ✅ 新增：标题口径默认值（用于 rank_title 动态显示）
+        # ✅ 仅用于展示的口径徽标（不影响计算）
         filter_badge = "全体"
 
         with col_filter:
-            # === 原有：拿到所有门店（用于兜底/交集）===
+            # 取当前数据里存在的门店（用于交集，避免归属表里出现“数据不存在”的门店）
             if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                 all_stores = sorted(list(df_stores["门店名称"].dropna().astype(str).str.strip().unique()))
             else:
                 all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
 
-            # === 新增：层级联动筛选（区域经理->省份->城市->门店）===
             store_map = get_store_map_df()
-            allowed_stores = all_stores[:]  # 默认不过滤（等同“全体”）
+            allowed_stores = all_stores[:]  # 默认不过滤（等同全体）
 
             if store_map is None:
-                # 归属表缺失/列不齐：回退到旧行为（只留一个门店下拉）
+                # 归属表缺失/列不齐：回退到旧逻辑（只留一个门店下拉）
                 store_options = ["全部"] + all_stores
                 selected_store = st.selectbox("🏭 切换门店视图", store_options)
             else:
-                # ① 区域经理
+                # ✅ 新：层级联动（区域经理 -> 省份 -> 城市 -> 门店名称）
                 mgr_opts = ["全体"] + sorted(store_map["区域经理"].dropna().astype(str).str.strip().unique().tolist())
                 sel_mgr = st.selectbox("区域经理", mgr_opts, key="sel_mgr")
 
                 tmp = store_map if sel_mgr == "全体" else store_map[store_map["区域经理"] == sel_mgr]
 
-                # ② 省份
                 prov_opts = ["全体"] + sorted(tmp["省份"].dropna().astype(str).str.strip().unique().tolist())
                 sel_prov = st.selectbox("省份", prov_opts, key="sel_prov")
 
                 tmp2 = tmp if sel_prov == "全体" else tmp[tmp["省份"] == sel_prov]
 
-                # ③ 城市
                 city_opts = ["全体"] + sorted(tmp2["城市"].dropna().astype(str).str.strip().unique().tolist())
                 sel_city = st.selectbox("城市", city_opts, key="sel_city")
 
                 tmp3 = tmp2 if sel_city == "全体" else tmp2[tmp2["城市"] == sel_city]
 
-                # ④ 门店（受上级约束，并且只展示当前数据里存在的门店）
                 store_opts = ["全体"] + sorted([s for s in tmp3["门店名称"].dropna().astype(str).str.strip().unique().tolist() if s in set(all_stores)])
                 sel_store = st.selectbox("门店名称", store_opts, key="sel_store")
 
-                # 计算允许的门店清单
                 mm = store_map.copy()
                 if sel_mgr != "全体":
                     mm = mm[mm["区域经理"] == sel_mgr]
@@ -705,20 +645,22 @@ if has_data:
 
                 allowed_stores = sorted([s for s in mm["门店名称"].dropna().astype(str).str.strip().unique().tolist() if s in set(all_stores)])
 
-                # 口径展示（用于 rank_title 动态）
                 parts = []
-                if sel_mgr != "全体": parts.append(sel_mgr)
-                if sel_prov != "全体": parts.append(sel_prov)
-                if sel_city != "全体": parts.append(sel_city)
-                if sel_store != "全体": parts.append(sel_store)
+                if sel_mgr != "全体":
+                    parts.append(sel_mgr)
+                if sel_prov != "全体":
+                    parts.append(sel_prov)
+                if sel_city != "全体":
+                    parts.append(sel_city)
+                if sel_store != "全体":
+                    parts.append(sel_store)
                 filter_badge = " / ".join(parts) if parts else "全体"
-
                 st.caption(f"当前筛选：{filter_badge}")
 
-                # ✅ 关键：只看门店口径，不展示管家/顾问明细
+                # ✅ 关键：四级筛选只做门店口径，不展示管家/顾问明细
                 selected_store = "全部"
 
-            # === 将筛选结果应用到两张表（只过滤门店范围，不改变字段/结构）===
+            # 应用门店范围过滤（只过滤门店范围，不改字段/结构）
             if allowed_stores is not None:
                 if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                     df_stores = df_stores[df_stores["门店名称"].astype(str).str.strip().isin(allowed_stores)].copy()
@@ -728,7 +670,7 @@ if has_data:
         if selected_store == "全部":
             current_df = df_stores.copy() if df_stores is not None else pd.DataFrame()
             current_df["名称"] = current_df.get("门店名称", "")
-            rank_title = f"🏆 {filter_badge} 门店排名"   # ✅ 动态标题
+            rank_title = f"🏆 {filter_badge} 门店排名"
             kpi_leads = current_df.get("线索量", pd.Series(dtype=float)).sum()
             kpi_visits = current_df.get("到店量", pd.Series(dtype=float)).sum()
             kpi_rate = kpi_visits / kpi_leads if kpi_leads > 0 else 0
@@ -812,10 +754,8 @@ if has_data:
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             plot_df_corr = plot_df_vis.copy()
 
-            # Y：线索到店率（小数），用于按百分比格式展示（保留1位小数）
             plot_df_corr["线索到店率_显示"] = pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
 
-            # X：过程指标（小数），强制限制在 0%~100%
             if x_axis_choice in plot_df_corr.columns:
                 plot_df_corr[x_axis_choice] = pd.to_numeric(plot_df_corr[x_axis_choice], errors="coerce").fillna(0).clip(0, 1)
 
@@ -831,16 +771,11 @@ if has_data:
                     height=300,
                 )
 
-                # 坐标轴：X 最大不超过 100%，Y 按百分比显示 1 位小数
-                # X 最大值不超过 100%，但右侧留一点空白（让 100% 的气泡不被裁切）
                 fig_p2.update_xaxes(range=[0, 1.02], tickformat=".0%", tick0=0, dtick=0.2)
                 fig_p2.update_yaxes(tickformat=".1%")
-
-                # 右侧留白：不改 X 最大值（仍是100%），但允许气泡超出坐标轴不被裁切
                 fig_p2.update_traces(cliponaxis=False)
                 fig_p2.update_layout(margin=dict(r=70))
 
-                # Hover：把到店率按百分比 1 位小数展示
                 if "线索量" in plot_df_corr.columns:
                     fig_p2.update_traces(
                         customdata=np.stack(
@@ -860,7 +795,6 @@ if has_data:
                             "线索到店率: %{customdata[2]:.1%}<br>"
                             "质检总分: %{customdata[3]:.1f}<br>"
                             "<extra></extra>"
-                        
                         ),
                     )
                 else:
@@ -934,7 +868,6 @@ if has_data:
                     height=400,
                 )
 
-                # Hover：线索到店率保留 1 位小数；并额外展示 60 秒通话占比得分（门店维度来自门店排名表）
                 s60 = pd.to_numeric(plot_df.get("S_60s", 0), errors="coerce").fillna(0)
                 total = pd.to_numeric(plot_df.get("质检总分", 0), errors="coerce").fillna(0)
                 leads = pd.to_numeric(plot_df.get("线索量", 0), errors="coerce").fillna(0)
@@ -1070,4 +1003,4 @@ if has_data:
                     st.warning("该门店下暂无数据。")
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
-    st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传所有 **4** 个数据文件。")
+    st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传所有 **4** 个数据文件（归属表第5项可选）。")
