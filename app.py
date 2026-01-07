@@ -188,7 +188,7 @@ def smart_read(file_path: str, is_rank_file: bool = False):
     # 很多报表第一行是标题（如“线索报表”），只命中一个关键词，而真正的表头会命中多个。
     keywords = [
         "门店", "顾问", "管家", "排名", "代理商", "序号", "线索", "质检", "添加微信",
-        "DCC", "接通", "外呼", "省份", "城市", "车系", "状态"
+        "DCC", "接通", "外呼", "省份", "城市", "车系", "状态", "跟进次数"
     ]
     
     best_row = 0
@@ -289,7 +289,11 @@ def _col_as_series(df: pd.DataFrame, col_name: str):
 
 
 @st.cache_data(ttl=300)
-def process_data(path_f, path_d, path_a, path_s):
+def process_data(path_f, path_d, path_a, path_s, _mtime_key):
+    """
+    _mtime_key: 传入文件修改时间作为缓存键，确保文件更新时强制重算。
+    """
+    debug_info = {}
     try:
         raw_f = smart_read(path_f)
         raw_d = smart_read(path_d)
@@ -297,7 +301,12 @@ def process_data(path_f, path_d, path_a, path_s):
         raw_s = smart_read(path_s, is_rank_file=True)
 
         if raw_f is None or raw_d is None or raw_a is None or raw_s is None:
-            return None, None
+            return None, None, {"error": "部分文件读取失败"}
+
+        # 收集 AMS 的调试信息
+        if raw_a is not None:
+            debug_info["ams_columns"] = list(raw_a.columns)
+            debug_info["ams_rows"] = len(raw_a)
 
         # ================= A. Funnel (漏斗) =================
         store_col = _pick_any_col(raw_f, ["代理商", "门店"]) or raw_f.columns[0]
@@ -427,6 +436,7 @@ def process_data(path_f, path_d, path_a, path_s):
         ]
 
         target_to_src = {}
+        ams_mapped_log = {} # debug
         for any_kw, target_name, exclude_kw in cols_config:
             if target_name in target_to_src:
                 continue
@@ -438,6 +448,11 @@ def process_data(path_f, path_d, path_a, path_s):
                     break
             if found is not None:
                 target_to_src[target_name] = found
+                ams_mapped_log[target_name] = found
+            else:
+                ams_mapped_log[target_name] = "❌ 未找到"
+
+        debug_info["ams_mapping"] = ams_mapped_log
 
         rename_map = {src: tgt for tgt, src in target_to_src.items()}
         df_a = raw_a.rename(columns=rename_map)
@@ -510,13 +525,13 @@ def process_data(path_f, path_d, path_a, path_s):
         full_stores.drop(columns=[c for c in full_stores.columns if str(c).startswith("SR_")], inplace=True, errors="ignore")
         full_stores.columns = dedupe_columns(full_stores.columns)
 
-        return full_advisors, full_stores
+        return full_advisors, full_stores, debug_info
 
     except Exception as e:
         st.error(f"处理出错: {e}")
         import traceback
         st.text(traceback.format_exc())
-        return None, None
+        return None, None, {}
 
 
 # ================= 4. 侧边栏逻辑（放到函数后，避免 NameError） =================
@@ -530,6 +545,15 @@ with st.sidebar:
         st.success("✅ 数据状态：已就绪")
     else:
         st.warning("⚠️ 暂无数据")
+    
+    # 底部显示诊断信息
+    if has_data and 'debug_info' in locals() and debug_info:
+        with st.expander("🛠️ 诊断信息 (若数据为0请看)"):
+            st.caption("以下是 AMS 表实际识别到的列名，请检查是否有“DCC接通线索数”等字段：")
+            st.json(debug_info.get("ams_columns", []))
+            st.caption("字段映射情况：")
+            st.json(debug_info.get("ams_mapping", {}))
+
     st.markdown("---")
 
     with st.expander("🔐 更新数据 (仅限管理员)"):
@@ -580,6 +604,7 @@ with st.sidebar:
                             pass
 
                     st.success("更新完成，正在刷新...")
+                    st.cache_data.clear() # ✅ 强制清空缓存，防止旧的错误数据残留
                     st.rerun()
 
                 # 情况2：只上传了归属表 -> 允许单独更新归属表（不动原4表）
@@ -587,6 +612,7 @@ with st.sidebar:
                     with st.spinner("正在保存归属表..."):
                         save_uploaded_file(new_m, PATH_M)
                     st.success("归属表更新完成，正在刷新...")
+                    st.cache_data.clear()
                     st.rerun()
 
                 else:
@@ -598,7 +624,17 @@ store_rank_path = get_store_rank_path()
 has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(PATH_A) and (store_rank_path is not None)
 
 if has_data:
-    df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A, store_rank_path)
+    # 获取修改时间作为 Key，强制更新
+    mtime_key = get_data_update_time(store_rank_path)
+    df_advisors, df_stores, debug_info = process_data(PATH_F, PATH_D, PATH_A, store_rank_path, mtime_key)
+
+    # 补充显示调试信息到侧边栏（如果刚才没显示的话）
+    if debug_info:
+        with st.sidebar.expander("🛠️ 诊断信息 (若数据为0请看)"):
+            st.caption("AMS表列名检查：")
+            st.json(debug_info.get("ams_columns", []))
+            st.caption("字段映射情况：")
+            st.json(debug_info.get("ams_mapping", {}))
 
     if df_advisors is not None:
         col_header, col_update, col_filter = st.columns([2.4, 1.2, 1])
