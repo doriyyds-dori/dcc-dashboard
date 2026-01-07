@@ -188,6 +188,15 @@ def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
     return None
 
 
+def _col_as_series(df: pd.DataFrame, col_name: str):
+    """df[col] 可能因为重复列名返回 DataFrame；这里统一压成 1D Series。"""
+    if col_name not in df.columns:
+        return None
+    x = df[col_name]
+    if isinstance(x, pd.DataFrame):
+        x = x.iloc[:, 0]
+    return x
+
 
 @st.cache_data(ttl=300)
 def process_data(path_f, path_d, path_a, path_s):
@@ -218,6 +227,8 @@ def process_data(path_f, path_d, path_a, path_s):
             rename_dict[col_excel_rate] = "Excel_Rate"
 
         df_f = raw_f.rename(columns=rename_dict)
+        # 防止 rename 后出现重复列名（会导致 df['门店名称'] 变成 DataFrame）
+        df_f.columns = dedupe_columns(df_f.columns)
 
         # 小计/合计行
         mask_sub = df_f["邀约专员/管家"].astype(str).str.contains("小计|合计|总计", na=False)
@@ -241,6 +252,7 @@ def process_data(path_f, path_d, path_a, path_s):
 
         # ================= B. DCC (顾问质检) =================
         df_d = raw_d.rename(
+
             columns={
                 "顾问名称": "邀约专员/管家",
                 "管家": "邀约专员/管家",
@@ -252,6 +264,9 @@ def process_data(path_f, path_d, path_a, path_s):
                 "明确到店时间": "S_Time",
             }
         )
+
+        # 防止 rename 后出现重复列名（避免 df['邀约专员/管家'] / df['门店名称'] 变成 DataFrame）
+        df_d.columns = dedupe_columns(df_d.columns)
 
         # 添加微信：可能重复列名，取第一列
         wechat_cols = [c for c in df_d.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
@@ -370,9 +385,13 @@ def process_data(path_f, path_d, path_a, path_s):
         # ================= E. Merge (合并数据) =================
         for df in [df_store_data, df_advisor_data, df_d, df_a, df_s]:
             if "邀约专员/管家" in df.columns:
-                df["邀约专员/管家"] = df["邀约专员/管家"].astype(str).str.strip()
+                s = _col_as_series(df, "邀约专员/管家")
+                if s is not None:
+                    df["邀约专员/管家"] = s.astype(str).str.strip()
             if "门店名称" in df.columns:
-                df["门店名称"] = df["门店名称"].astype(str).str.strip()
+                s2 = _col_as_series(df, "门店名称")
+                if s2 is not None:
+                    df["门店名称"] = s2.astype(str).str.strip()
 
         # 1) 顾问全量表
         full_advisors = pd.merge(df_advisor_data, df_d, on="邀约专员/管家", how="left")
