@@ -352,7 +352,7 @@ def process_data(path_f, path_d, path_a, path_s):
             store_name = pd.Series(["" for _ in range(len(raw_s))])
 
         col_total = pick_col_by_keywords(raw_s, ["质检总分", "总分"], exclude=["显示"])
-        col_60s = pick_col_by_keywords(raw_s, ["60秒", "60 秒"], must_have_any=["60秒", "60 秒"], exclude=[])
+        col_60s = pick_col_by_keywords(raw_s, ["60秒", "60 秒"], exclude=[])
         col_needs = pick_col_by_keywords(raw_s, ["用车需求"], exclude=[])
         col_car = pick_col_by_keywords(raw_s, ["车型信息"], exclude=[])
         col_policy = pick_col_by_keywords(raw_s, ["政策"], exclude=[])
