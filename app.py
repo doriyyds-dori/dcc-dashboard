@@ -42,9 +42,17 @@ PATH_M = os.path.join(DATA_DIR, "store_map.xlsx")
 STORE_MAP_FALLBACK = "/mnt/data/代理商名称归属.xlsx"
 
 
+def _resolve_store_map_path():
+    if os.path.exists(PATH_M):
+        return PATH_M
+    if os.path.exists(STORE_MAP_FALLBACK):
+        return STORE_MAP_FALLBACK
+    return None
+
+
 def get_store_map_df():
     """读取门店归属表；若不存在或列不齐，返回 None（自动回退到旧的门店下拉）。"""
-    map_path = PATH_M if os.path.exists(PATH_M) else (STORE_MAP_FALLBACK if os.path.exists(STORE_MAP_FALLBACK) else None)
+    map_path = _resolve_store_map_path()
     if not map_path:
         return None
 
@@ -298,14 +306,11 @@ def process_data(path_f, path_d, path_a, path_s):
             rename_dict[col_excel_rate] = "Excel_Rate"
 
         df_f = raw_f.rename(columns=rename_dict)
-        # 防止 rename 后出现重复列名（会导致 df['门店名称'] 变成 DataFrame）
         df_f.columns = dedupe_columns(df_f.columns)
 
-        # 小计/合计行
         mask_sub = df_f["邀约专员/管家"].astype(str).str.contains("小计|合计|总计", na=False)
         df_store_data = df_f[mask_sub].copy()
 
-        # 顾问明细：排除小计/空/分隔符
         mask_bad = df_f["邀约专员/管家"].astype(str).str.strip().isin(["", "-", "—", "nan"])
         df_advisor_data = df_f[~mask_sub & ~mask_bad].copy()
 
@@ -321,7 +326,6 @@ def process_data(path_f, path_d, path_a, path_s):
 
             df["线索到店率"] = (df["线索到店率_数值"] * 100).map("{:.1f}%".format)
 
-        # ✅ 防止和门店排名表的质检列重名导致 merge 生成 _x/_y：
         store_qc_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
 
@@ -338,7 +342,6 @@ def process_data(path_f, path_d, path_a, path_s):
                 "明确到店时间": "S_Time",
             }
         )
-
         df_d.columns = dedupe_columns(df_d.columns)
 
         wechat_cols = [c for c in df_d.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
@@ -385,7 +388,6 @@ def process_data(path_f, path_d, path_a, path_s):
         col_wechat = pick_col_by_keywords(raw_s, ["添加微信", "加微信", "加微"], exclude=[])
 
         df_s = pd.DataFrame({"门店名称": store_name})
-
         df_s["SR_质检总分"] = _to_1d_numeric(raw_s[col_total]) if (col_total and col_total in raw_s.columns) else np.nan
         df_s["SR_S_60s"] = _to_1d_numeric(raw_s[col_60s]) if (col_60s and col_60s in raw_s.columns) else np.nan
         df_s["SR_S_Needs"] = _to_1d_numeric(raw_s[col_needs]) if (col_needs and col_needs in raw_s.columns) else np.nan
@@ -531,6 +533,7 @@ with st.sidebar:
             new_m = st.file_uploader("5. 代理商名称归属(区域经理/省份/城市/门店)", type=["xlsx"], key="up_m")
 
             if st.button("🚀 确认更新数据"):
+                # 情况1：4个主数据齐全 -> 正常更新 4 表（归属表可选一起更）
                 if new_f and new_d and new_a and new_s:
                     with st.spinner("正在保存数据..."):
                         save_uploaded_file(new_f, PATH_F)
@@ -553,7 +556,7 @@ with st.sidebar:
                                     pass
                             save_uploaded_file(new_s, PATH_S_CSV)
 
-                        # ✅ 归属表：可选上传（不影响原4表更新）
+                        # ✅ 归属表：可选一起上传
                         if new_m is not None:
                             save_uploaded_file(new_m, PATH_M)
 
@@ -566,8 +569,16 @@ with st.sidebar:
 
                     st.success("更新完成，正在刷新...")
                     st.rerun()
+
+                # 情况2：只上传了归属表 -> 允许单独更新归属表（不动原4表）
+                elif new_m is not None:
+                    with st.spinner("正在保存归属表..."):
+                        save_uploaded_file(new_m, PATH_M)
+                    st.success("归属表更新完成，正在刷新...")
+                    st.rerun()
+
                 else:
-                    st.error("请传齐 4 个文件（归属表第5项可选）")
+                    st.error("请传齐 4 个文件（或至少单独上传第5个归属表）")
 
 
 # ================= 5. 界面渲染 =================
@@ -606,11 +617,17 @@ if has_data:
             else:
                 all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
 
+            # ✅ 自检行：不影响功能（只展示归属表是否加载/路径/时间）
+            map_path = _resolve_store_map_path()
+            map_exists = bool(map_path and os.path.exists(map_path))
+            map_mtime = datetime.fromtimestamp(os.path.getmtime(map_path)).strftime("%Y-%m-%d %H:%M:%S") if map_exists else "—"
+            st.caption(f"🧭 归属表自检：{'✅已检测到' if map_exists else '❌未检测到'} ｜ 路径：{map_path or '无'} ｜ 修改时间：{map_mtime}")
+
             store_map = get_store_map_df()
             allowed_stores = all_stores[:]  # 默认不过滤（等同全体）
 
             if store_map is None:
-                # 归属表缺失/列不齐：回退到旧逻辑（只留一个门店下拉）
+                st.warning("未加载门店归属表（第5项）或列名不匹配（需：区域经理/省份/城市/门店名称）。将回退到【门店下拉】模式。")
                 store_options = ["全部"] + all_stores
                 selected_store = st.selectbox("🏭 切换门店视图", store_options)
             else:
@@ -657,8 +674,8 @@ if has_data:
                 filter_badge = " / ".join(parts) if parts else "全体"
                 st.caption(f"当前筛选：{filter_badge}")
 
-                # ✅ 关键：四级筛选只做门店口径，不展示管家/顾问明细
-                selected_store = "全部"
+                # ✅ 四级筛选默认仍是门店范围口径
+                selected_store = "全部" if sel_store == "全体" else sel_store
 
             # 应用门店范围过滤（只过滤门店范围，不改字段/结构）
             if allowed_stores is not None:
@@ -715,7 +732,6 @@ if has_data:
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         st.caption("注：以上为加权平均值（sum/sum）")
 
-        # 绘图数据准备
         plot_df_vis = current_df.copy()
         if "质检总分" in plot_df_vis.columns:
             plot_df_vis["质检总分_显示"] = plot_df_vis["质检总分"].fillna(0)
@@ -741,7 +757,11 @@ if has_data:
                 )
                 fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
                 if "S_60s" in plot_df_vis.columns:
-                    fig_p1.add_hline(y=pd.to_numeric(plot_df_vis["S_60s"], errors="coerce").fillna(0).mean(), line_dash="dash", line_color="gray")
+                    fig_p1.add_hline(
+                        y=pd.to_numeric(plot_df_vis["S_60s"], errors="coerce").fillna(0).mean(),
+                        line_dash="dash",
+                        line_color="gray",
+                    )
                 fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
                 st.plotly_chart(fig_p1, use_container_width=True)
             else:
@@ -898,7 +918,7 @@ if has_data:
         with st.container():
             st.markdown("### 🕵️‍♀️ 邀约专员/管家深度诊断")
             if selected_store == "全部":
-                st.info("💡 请先选择具体【门店】，查看该门店下的顾问详细诊断。")
+                st.info("💡 请先选择具体【门店名称】（四级联动中选到具体门店），查看该门店下的顾问详细诊断。")
             else:
                 diag_df = current_df.copy()
                 if "线索量" in diag_df.columns:
