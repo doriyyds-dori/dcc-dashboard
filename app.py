@@ -328,54 +328,79 @@ def process_data(path_f, path_d, path_a, path_s):
 
         # ================= C. Store Scores (门店质检) =================
         # ⚠️ 规则：门店维度的所有“质检得分”必须【直接取自门店排名表】(raw_s)，不做任何二次计算/聚合。
-        df_s = raw_s.rename(
-            columns={
-                "60秒通话": "S_60s",
-                "用车需求": "S_Needs",
-                "车型信息": "S_Car",
-                "政策相关": "S_Policy",
-                "明确到店时间": "S_Time",
-            }
-        )
 
-        # 门店名称：可能同时存在“门店名称 / 门店名称__1 / 门店”等多列，先合并成唯一的“门店名称”
-        store_name_cols = [c for c in df_s.columns if ("门店" in str(c)) and ("ID" not in str(c))]
-        if not store_name_cols:
-            df_s["门店名称"] = ""
-        else:
-            tmp = df_s[store_name_cols]
+        # 1) 先统一列名（用“关键词找列”，避免源表列名微调导致取不到）
+        def pick_col_by_keywords(df: pd.DataFrame, must_have_any, must_have_all=None, exclude=None):
+            must_have_all = must_have_all or []
+            exclude = exclude or []
+            for c in df.columns:
+                s = str(c)
+                if any(k in s for k in must_have_any) and all(k in s for k in must_have_all) and not any(x in s for x in exclude):
+                    return c
+            return None
+
+        # 门店名称列（可能出现多列：门店名称/门店/门店名称__1...）
+        store_name_candidates = [c for c in raw_s.columns if ("门店" in str(c)) and ("ID" not in str(c)) and ("编号" not in str(c))]
+        if store_name_candidates:
+            tmp = raw_s[store_name_candidates]
             if isinstance(tmp, pd.Series):
-                df_s["门店名称"] = tmp.astype(str).str.strip()
+                store_name = tmp.astype(str)
             else:
-                df_s["门店名称"] = tmp.bfill(axis=1).iloc[:, 0].astype(str).str.strip()
-            # 删除多余门店列（保留门店名称）
-            drop_cols = [c for c in store_name_cols if c != "门店名称"]
-            df_s.drop(columns=drop_cols, inplace=True, errors="ignore")
-
-        # 再次确保列名唯一（避免 merge 报 The column label '门店名称' is not unique）
-        df_s.columns = dedupe_columns(df_s.columns)
-
-        # 添加微信：可能重复列名，取第一列（或多列择优填充）
-        s_wechat_cols = [c for c in df_s.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
-        if s_wechat_cols:
-            df_s["S_Wechat"] = _to_1d_numeric(df_s[s_wechat_cols])
+                store_name = tmp.bfill(axis=1).iloc[:, 0].astype(str)
+            store_name = store_name.str.strip()
         else:
-            df_s["S_Wechat"] = 0
+            store_name = pd.Series(["" for _ in range(len(raw_s))])
 
-        store_score_cols = ["门店名称", "质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
-        available_store_cols = [c for c in store_score_cols if c in df_s.columns]
-        df_s = df_s[available_store_cols]
+        col_total = pick_col_by_keywords(raw_s, ["质检总分", "总分"], exclude=["显示"])
+        col_60s = pick_col_by_keywords(raw_s, ["60秒", "60 秒"], must_have_any=["60秒", "60 秒"], exclude=[])
+        col_needs = pick_col_by_keywords(raw_s, ["用车需求"], exclude=[])
+        col_car = pick_col_by_keywords(raw_s, ["车型信息"], exclude=[])
+        col_policy = pick_col_by_keywords(raw_s, ["政策"], exclude=[])
+        col_time = pick_col_by_keywords(raw_s, ["明确到店" , "到店时间"], exclude=[])
+        col_wechat = pick_col_by_keywords(raw_s, ["添加微信", "加微信", "加微"], exclude=[])
 
-        # 数值化（仍然是“原表数值”，只是转成 numeric 便于画图）
-        for c in available_store_cols:
-            if c != "门店名称":
-                df_s[c] = pd.to_numeric(df_s[c], errors="coerce")
+        # 2) 组装门店质检表（全部加 SR_ 前缀，防止 merge 后被覆盖/变 _x/_y）
+        df_s = pd.DataFrame({"门店名称": store_name})
 
-        # 关键：保证每个门店只有一行（避免 merge 放大行数）；如果源表重复，保留第一条（仍是原表取值）
-        if "门店名称" in df_s.columns:
-            df_s["门店名称"] = df_s["门店名称"].astype(str).str.strip()
-            df_s = df_s[df_s["门店名称"].astype(str).str.strip().ne("")].copy()
-            df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
+        if col_total and col_total in raw_s.columns:
+            df_s["SR_质检总分"] = _to_1d_numeric(raw_s[col_total])
+        else:
+            df_s["SR_质检总分"] = np.nan
+
+        if col_60s and col_60s in raw_s.columns:
+            df_s["SR_S_60s"] = _to_1d_numeric(raw_s[col_60s])
+        else:
+            df_s["SR_S_60s"] = np.nan
+
+        if col_needs and col_needs in raw_s.columns:
+            df_s["SR_S_Needs"] = _to_1d_numeric(raw_s[col_needs])
+        else:
+            df_s["SR_S_Needs"] = np.nan
+
+        if col_car and col_car in raw_s.columns:
+            df_s["SR_S_Car"] = _to_1d_numeric(raw_s[col_car])
+        else:
+            df_s["SR_S_Car"] = np.nan
+
+        if col_policy and col_policy in raw_s.columns:
+            df_s["SR_S_Policy"] = _to_1d_numeric(raw_s[col_policy])
+        else:
+            df_s["SR_S_Policy"] = np.nan
+
+        if col_wechat and col_wechat in raw_s.columns:
+            df_s["SR_S_Wechat"] = _to_1d_numeric(raw_s[col_wechat])
+        else:
+            df_s["SR_S_Wechat"] = np.nan
+
+        if col_time and col_time in raw_s.columns:
+            df_s["SR_S_Time"] = _to_1d_numeric(raw_s[col_time])
+        else:
+            df_s["SR_S_Time"] = np.nan
+
+        # 3) 清理：空门店、重复门店（保留第一条）
+        df_s["门店名称"] = df_s["门店名称"].astype(str).str.strip()
+        df_s = df_s[df_s["门店名称"].ne("")].copy()
+        df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
 
         # ================= D. AMS (跟进数据) =================
         # 你原来的 cols_config 思路保留，但修复“未接通误命中/重复列导致 DataFrame”
@@ -480,10 +505,23 @@ def process_data(path_f, path_d, path_a, path_s):
             store_ams["DCC三次外呼率"] = safe_div(store_ams, "call3_num", "call3_denom")
 
         # 门店层：漏斗(小计) + 门店排名表质检分 + 门店AMS加总
+        # ⚠️ 关键：门店质检列只认 df_s（SR_ 前缀），merge 后再“落回”标准列名，确保绝对来自门店排名表。
         full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
         full_stores = pd.merge(full_stores, store_ams, on="门店名称", how="left")
 
-        # 再兜底一次：确保门店质检列就是 df_s 的原列名（不出现 _x/_y）
+        # 从 SR_ 字段回填标准字段（保证门店图表读取到的是门店排名表的原值）
+        full_stores["质检总分"] = full_stores.get("SR_质检总分")
+        full_stores["S_60s"] = full_stores.get("SR_S_60s")
+        full_stores["S_Needs"] = full_stores.get("SR_S_Needs")
+        full_stores["S_Car"] = full_stores.get("SR_S_Car")
+        full_stores["S_Policy"] = full_stores.get("SR_S_Policy")
+        full_stores["S_Wechat"] = full_stores.get("SR_S_Wechat")
+        full_stores["S_Time"] = full_stores.get("SR_S_Time")
+
+        # 清理 SR_ 临时列（避免后续误用）
+        full_stores.drop(columns=[c for c in full_stores.columns if str(c).startswith("SR_")], inplace=True, errors="ignore")
+
+        # 再兜底一次：确保列名唯一
         full_stores.columns = dedupe_columns(full_stores.columns)
 
         return full_advisors, full_stores
@@ -699,7 +737,8 @@ if has_data:
                 )
 
                 # 坐标轴：X 最大不超过 100%，Y 按百分比显示 1 位小数
-                fig_p2.update_xaxes(range=[0, 1], tickformat=".0%")
+                # X 最大值不超过 100%，但右侧留一点空白（让 100% 的气泡不被裁切）
+                fig_p2.update_xaxes(range=[0, 1.02], tickformat=".0%", tick0=0, dtick=0.2)
                 fig_p2.update_yaxes(tickformat=".1%")
 
                 # 右侧留白：不改 X 最大值（仍是100%），但允许气泡超出坐标轴不被裁切
@@ -799,9 +838,28 @@ if has_data:
                     color_continuous_scale="Reds",
                     height=400,
                 )
+
+                # Hover：线索到店率保留 1 位小数；并额外展示 60 秒通话占比得分（门店维度来自门店排名表）
+                s60 = pd.to_numeric(plot_df.get("S_60s", 0), errors="coerce").fillna(0)
+                total = pd.to_numeric(plot_df.get("质检总分", 0), errors="coerce").fillna(0)
+                leads = pd.to_numeric(plot_df.get("线索量", 0), errors="coerce").fillna(0)
+                fig.update_traces(
+                    customdata=np.stack((leads, s60, total), axis=-1),
+                    hovertemplate=(
+                        "<b>%{hovertext}</b><br><br>"
+                        "明确到店时间得分: %{x:.1f}<br>"
+                        "线索到店率: %{y:.1f}%<br>"
+                        "线索量: %{customdata[0]:,.0f}<br>"
+                        "60秒通话占比得分: %{customdata[1]:.1f}<br>"
+                        "质检总分: %{customdata[2]:.1f}<br>"
+                        "<extra></extra>"
+                    ),
+                )
+
                 if not plot_df.empty:
                     fig.add_vline(x=pd.to_numeric(plot_df["S_Time"], errors="coerce").fillna(0).mean(), line_dash="dash", line_color="gray")
                     fig.add_hline(y=kpi_rate * 100, line_dash="dash", line_color="gray")
+
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("缺少“明确到店时间”数据，无法绘图")
