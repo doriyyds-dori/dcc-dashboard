@@ -288,6 +288,11 @@ def process_data(path_f, path_d, path_a, path_s):
 
             df["线索到店率"] = (df["线索到店率_数值"] * 100).map("{:.1f}%".format)
 
+        # ✅ 防止和门店排名表的质检列重名导致 merge 生成 _x/_y：
+        # 门店维度的质检分数全部来自 df_s（门店排名表），漏斗小计里若存在同名列则丢弃。
+        store_qc_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
+        df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
+
         # ================= B. DCC (顾问质检) =================
         df_d = raw_d.rename(
 
@@ -322,6 +327,7 @@ def process_data(path_f, path_d, path_a, path_s):
         df_d = df_d[["邀约专员/管家"] + [c for c in score_cols if c in df_d.columns]]
 
         # ================= C. Store Scores (门店质检) =================
+        # ⚠️ 规则：门店维度的所有“质检得分”必须【直接取自门店排名表】(raw_s)，不做任何二次计算/聚合。
         df_s = raw_s.rename(
             columns={
                 "60秒通话": "S_60s",
@@ -349,6 +355,7 @@ def process_data(path_f, path_d, path_a, path_s):
         # 再次确保列名唯一（避免 merge 报 The column label '门店名称' is not unique）
         df_s.columns = dedupe_columns(df_s.columns)
 
+        # 添加微信：可能重复列名，取第一列（或多列择优填充）
         s_wechat_cols = [c for c in df_s.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
         if s_wechat_cols:
             df_s["S_Wechat"] = _to_1d_numeric(df_s[s_wechat_cols])
@@ -358,9 +365,17 @@ def process_data(path_f, path_d, path_a, path_s):
         store_score_cols = ["门店名称", "质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         available_store_cols = [c for c in store_score_cols if c in df_s.columns]
         df_s = df_s[available_store_cols]
+
+        # 数值化（仍然是“原表数值”，只是转成 numeric 便于画图）
         for c in available_store_cols:
             if c != "门店名称":
                 df_s[c] = pd.to_numeric(df_s[c], errors="coerce")
+
+        # 关键：保证每个门店只有一行（避免 merge 放大行数）；如果源表重复，保留第一条（仍是原表取值）
+        if "门店名称" in df_s.columns:
+            df_s["门店名称"] = df_s["门店名称"].astype(str).str.strip()
+            df_s = df_s[df_s["门店名称"].astype(str).str.strip().ne("")].copy()
+            df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
 
         # ================= D. AMS (跟进数据) =================
         # 你原来的 cols_config 思路保留，但修复“未接通误命中/重复列导致 DataFrame”
@@ -464,8 +479,12 @@ def process_data(path_f, path_d, path_a, path_s):
             store_ams["DCC二次外呼率"] = safe_div(store_ams, "call2_num", "call2_denom")
             store_ams["DCC三次外呼率"] = safe_div(store_ams, "call3_num", "call3_denom")
 
+        # 门店层：漏斗(小计) + 门店排名表质检分 + 门店AMS加总
         full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
         full_stores = pd.merge(full_stores, store_ams, on="门店名称", how="left")
+
+        # 再兜底一次：确保门店质检列就是 df_s 的原列名（不出现 _x/_y）
+        full_stores.columns = dedupe_columns(full_stores.columns)
 
         return full_advisors, full_stores
 
