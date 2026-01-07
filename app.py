@@ -320,24 +320,100 @@ def process_data(path_f, path_d, path_a, store_rank_path):
                 df_s[c] = pd.to_numeric(df_s[c], errors="coerce")
 
         # --- D. AMS表 ---
+        # ✅ 这张 AMS 表（你上传的 AMS线索跟进报表）里，存在“DCC接通线索数 / DCC未接通线索数”等字段
+        # 之前的模糊匹配会把“未接通线索数”也命中到 conn_num，导致重命名后出现重复列名，进而 df_a['conn_num'] 变成 DataFrame。
+        # 这里改成“优先精确列名 + 排除未接通”，并且加一层兜底把多列压成一列。
+
+        def _to_1d_numeric(x):
+            """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。"""
+            if isinstance(x, pd.DataFrame):
+                tmp = x.apply(pd.to_numeric, errors="coerce")
+                # 取最左侧非空值（不盲目相加，避免重复列导致翻倍）
+                return tmp.bfill(axis=1).iloc[:, 0].fillna(0)
+            return pd.to_numeric(x, errors="coerce").fillna(0)
+
+        # 1) 找“姓名列”
+        advisor_col = next(
+            (
+                c
+                for c in raw_a.columns
+                if any(k in str(c) for k in ["管家姓名", "顾问姓名", "顾问名称", "管家"])
+            ),
+            None,
+        )
+
+        # 2) 找“接通线索数”（排除未接通）
+        conn_num_col = next(
+            (
+                c
+                for c in raw_a.columns
+                if ("接通线索" in str(c)) and ("未接通" not in str(c))
+            ),
+            None,
+        )
+        if conn_num_col is None:
+            conn_num_col = next(
+                (
+                    c
+                    for c in raw_a.columns
+                    if ("接通" in str(c))
+                    and ("线索" in str(c))
+                    and ("未接通" not in str(c))
+                    and ("率" not in str(c))
+                ),
+                None,
+            )
+
+        # 3) 找“总线索数/线索数量”作为分母
+        conn_denom_col = next(
+            (
+                c
+                for c in raw_a.columns
+                if str(c) in ["线索数量", "线索数", "总线索数"]
+            ),
+            None,
+        )
+        if conn_denom_col is None:
+            conn_denom_col = next(
+                (
+                    c
+                    for c in raw_a.columns
+                    if ("线索" in str(c)) and ("数量" in str(c)) and ("率" not in str(c))
+                ),
+                None,
+            )
+
+        # 4) 通话时长（优先平均通话时长）
+        talk_col = next(
+            (
+                c
+                for c in raw_a.columns
+                if "平均通话时长" in str(c)
+            ),
+            None,
+        )
+
+        # 5) 重命名并清洗
         a_map = {}
-        for c in raw_a.columns:
-            sc = str(c)
-            if "接通" in sc and "线索" in sc and "率" not in sc:
-                a_map[c] = "conn_num"
-            if "外呼" in sc and "线索" in sc and "需" not in sc and "率" not in sc:
-                a_map[c] = "conn_denom"
-            if "管家" in sc or "顾问" in sc:
-                a_map[c] = "邀约专员/管家"
-            if "平均通话时长" in sc:
-                a_map[c] = "通话时长"
+        if advisor_col is not None:
+            a_map[advisor_col] = "邀约专员/管家"
+        if conn_num_col is not None:
+            a_map[conn_num_col] = "conn_num"
+        if conn_denom_col is not None:
+            a_map[conn_denom_col] = "conn_denom"
+        if talk_col is not None:
+            a_map[talk_col] = "通话时长"
 
         df_a = raw_a.rename(columns=a_map)
+
+        # 兜底：确保列存在且是一维
+        if "邀约专员/管家" not in df_a.columns:
+            df_a["邀约专员/管家"] = ""
+
         for c in ["conn_num", "conn_denom", "通话时长"]:
             if c not in df_a.columns:
                 df_a[c] = 0
-            else:
-                df_a[c] = pd.to_numeric(df_a[c], errors="coerce").fillna(0)
+            df_a[c] = _to_1d_numeric(df_a[c])
 
         # --- E. 合并 ---
         for df in [df_advisor_data, df_d, df_a, df_store_data, df_s]:
