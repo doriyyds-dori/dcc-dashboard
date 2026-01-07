@@ -623,6 +623,10 @@ if has_data:
                 fig_p2.update_xaxes(range=[0, 1], tickformat=".0%")
                 fig_p2.update_yaxes(tickformat=".1%")
 
+                # 右侧留白：不改 X 最大值（仍是100%），但允许气泡超出坐标轴不被裁切
+                fig_p2.update_traces(cliponaxis=False)
+                fig_p2.update_layout(margin=dict(r=70))
+
                 # Hover：把到店率按百分比 1 位小数展示
                 if "线索量" in plot_df_corr.columns:
                     fig_p2.update_traces(
@@ -635,6 +639,7 @@ if has_data:
                             ),
                             axis=-1,
                         ),
+                        cliponaxis=False,
                         hovertemplate=(
                             "<b>%{hovertext}</b><br><br>"
                             "线索量: %{customdata[0]:,.0f}<br>"
@@ -642,6 +647,7 @@ if has_data:
                             "线索到店率: %{customdata[2]:.1%}<br>"
                             "质检总分: %{customdata[3]:.1f}<br>"
                             "<extra></extra>"
+                        
                         ),
                     )
                 else:
