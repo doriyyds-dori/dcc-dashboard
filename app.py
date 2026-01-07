@@ -55,8 +55,25 @@ def get_store_rank_path():
     return None
 
 
+LAST_UPDATE_FILE = os.path.join(DATA_DIR, "_last_upload_time.txt")
+
+
 def get_data_update_time(store_rank_path: str | None):
-    """返回 4 个数据文件中最新的修改时间（本地保存/覆盖后会更新）。"""
+    """返回【最新一次上传数据报】的时间。
+
+    优先读取 _last_upload_time.txt（点击“确认更新数据”时写入）。
+    若不存在，则回退到 4 个数据文件的最新修改时间。
+    """
+    # 1) 以“上传动作时间”为准
+    if os.path.exists(LAST_UPDATE_FILE):
+        try:
+            txt = open(LAST_UPDATE_FILE, "r", encoding="utf-8").read().strip()
+            if txt:
+                return datetime.fromisoformat(txt)
+        except Exception:
+            pass
+
+    # 2) 回退：文件修改时间
     paths = [PATH_F, PATH_D, PATH_A]
     if store_rank_path:
         paths.append(store_rank_path)
@@ -508,6 +525,13 @@ with st.sidebar:
                                 except Exception:
                                     pass
                             save_uploaded_file(new_s, PATH_S_CSV)
+
+                        # ✅ 写入“最新一次上传数据报时间”
+                        try:
+                            with open(LAST_UPDATE_FILE, "w", encoding="utf-8") as f:
+                                f.write(datetime.now().isoformat(timespec="seconds"))
+                        except Exception:
+                            pass
 
                     st.success("更新完成，正在刷新...")
                     st.rerun()
