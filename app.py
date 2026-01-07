@@ -1,15 +1,14 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
 import os
-from datetime import datetime
 
 # ================= 1. 页面配置 =================
 st.set_page_config(page_title="Audi DCC 效能看板", layout="wide", page_icon="🏎️")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
     .metric-card {background-color: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);}
     div[data-testid="stSelectbox"] {min-width: 200px;}
@@ -25,22 +24,24 @@ st.markdown("""
         color: white;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ================= 2. 基础配置 =================
 ADMIN_PASSWORD = "AudiSARR3"
 DATA_DIR = "data_store"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ✅ 统一：第4个门店排名表固定为 xlsx（根治你现在的报错）
+# ✅ 固定 store_rank 以 xlsx 为主；兼容误传 csv
 PATH_F = os.path.join(DATA_DIR, "funnel.xlsx")
 PATH_D = os.path.join(DATA_DIR, "dcc.xlsx")
 PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
 PATH_S_XLSX = os.path.join(DATA_DIR, "store_rank.xlsx")
-PATH_S_CSV  = os.path.join(DATA_DIR, "store_rank.csv")  # 兼容误传csv（可选）
+PATH_S_CSV = os.path.join(DATA_DIR, "store_rank.csv")
 
-def save_uploaded_file(uploaded_file, save_path):
-    """按指定路径保存上传文件（字节原样写入）"""
+
+def save_uploaded_file(uploaded_file, save_path: str) -> bool:
     try:
         with open(save_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
@@ -49,19 +50,20 @@ def save_uploaded_file(uploaded_file, save_path):
         st.error(f"文件保存失败: {e}")
         return False
 
+
 def get_store_rank_path():
-    """优先使用xlsx；如果只有csv则用csv"""
     if os.path.exists(PATH_S_XLSX):
         return PATH_S_XLSX
     if os.path.exists(PATH_S_CSV):
         return PATH_S_CSV
     return None
 
+
 # ================= 3. 侧边栏 =================
 with st.sidebar:
     st.image(
         "https://upload.wikimedia.org/wikipedia/commons/thumb/9/92/Audi-Logo_2016.svg/1200px-Audi-Logo_2016.svg.png",
-        width=150
+        width=150,
     )
     st.header("⚙️ 管理面板")
 
@@ -89,27 +91,17 @@ with st.sidebar:
                 new_f = st.file_uploader("1. 漏斗表 (funnel)", type=["xlsx", "csv"])
                 new_d = st.file_uploader("2. 顾问质检表 (dcc)", type=["xlsx", "csv"])
                 new_a = st.file_uploader("3. AMS表 (ams)", type=["xlsx", "csv"])
-                # ✅ 门店排名表：推荐上传 xlsx；也允许csv兜底
                 new_s = st.file_uploader("4. 门店排名表 (store_rank)", type=["xlsx", "csv"])
 
                 if st.form_submit_button("🚀 确认并更新数据"):
                     if new_f and new_d and new_a and new_s:
                         with st.spinner("正在保存并处理..."):
-                            # ✅ 清理历史错误文件（你之前把xlsx写成store_rank.csv会导致读csv解码爆炸）
-                            if os.path.exists(PATH_S_CSV) and os.path.exists(PATH_S_XLSX):
-                                # 两个都存在时，优先保留xlsx
-                                try:
-                                    os.remove(PATH_S_CSV)
-                                except Exception:
-                                    pass
-
                             s1 = save_uploaded_file(new_f, PATH_F)
                             s2 = save_uploaded_file(new_d, PATH_D)
                             s3 = save_uploaded_file(new_a, PATH_A)
 
-                            # ✅ 根据上传的真实后缀保存（xlsx->xlsx，csv->csv）
+                            # ✅ store_rank 根据上传真实后缀保存
                             if new_s.name.lower().endswith(".xlsx"):
-                                # 删除旧csv，避免误读
                                 if os.path.exists(PATH_S_CSV):
                                     try:
                                         os.remove(PATH_S_CSV)
@@ -117,7 +109,6 @@ with st.sidebar:
                                         pass
                                 s4 = save_uploaded_file(new_s, PATH_S_XLSX)
                             else:
-                                # 删除旧xlsx，避免混乱
                                 if os.path.exists(PATH_S_XLSX):
                                     try:
                                         os.remove(PATH_S_XLSX)
@@ -133,37 +124,48 @@ with st.sidebar:
         elif pwd:
             st.error("密码错误")
 
-# ================= 4. 数据处理 =================
-def smart_read(file_path):
-    """
-    增强版文件读取：
+
+# ================= 4. 数据读取与处理 =================
+def dedupe_columns(columns):
+    """把重复列名变成: 列名, 列名__1, 列名__2 ..."""
+    seen = {}
+    new_cols = []
+    for c in list(columns):
+        c = str(c)
+        if c not in seen:
+            seen[c] = 0
+            new_cols.append(c)
+        else:
+            seen[c] += 1
+            new_cols.append(f"{c}__{seen[c]}")
+    return new_cols
+
+
+def smart_read(file_path: str):
+    """增强版读取：
     - xlsx: read_excel(header=None)
-    - csv: 多编码尝试 + on_bad_lines='skip'
-    - 额外兜底：如果文件签名是PK(其实是xlsx)，即便后缀是csv也按xlsx读（避免再次炸）
+    - csv: 多编码尝试
+    - 兜底：若文件签名是 PK..（其实是xlsx），即便后缀是csv也按xlsx读
+    - 关键：列名去重，避免 df['添加微信'] 取出多列
     """
     try:
         if not file_path or not os.path.exists(file_path):
             return None
 
-        # ✅ 兜底：内容签名判断（xlsx是zip: PK..）
+        df = None
+
+        # 兜底：签名判断（xlsx/docx/pptx 都是 zip: PK..）
         try:
             with open(file_path, "rb") as f:
                 sig = f.read(4)
             if sig == b"PK\x03\x04":
                 df = pd.read_excel(file_path, header=None)
-            else:
-                df = None
         except Exception:
-            df = None
+            pass
 
-        # 正常分支
         if df is None:
             if file_path.lower().endswith(".xlsx"):
-                try:
-                    df = pd.read_excel(file_path, header=None)
-                except Exception as e:
-                    st.error(f"Excel读取错误 {os.path.basename(file_path)}: {e}")
-                    return None
+                df = pd.read_excel(file_path, header=None)
             else:
                 encodings = ["utf-8-sig", "gb18030", "utf-16"]
                 for enc in encodings:
@@ -173,7 +175,7 @@ def smart_read(file_path):
                             header=None,
                             encoding=enc,
                             engine="python",
-                            on_bad_lines="skip"
+                            on_bad_lines="skip",
                         )
                         break
                     except (UnicodeDecodeError, pd.errors.ParserError):
@@ -181,23 +183,21 @@ def smart_read(file_path):
                     except Exception:
                         continue
 
-                if df is None:
-                    st.error(f"❌ 无法识别文件编码，请检查文件: {os.path.basename(file_path)}")
-                    return None
+        if df is None:
+            st.error(f"❌ 无法读取文件: {os.path.basename(file_path)}")
+            return None
 
-        # 智能寻找表头
+        # 智能找表头
         header_row = 0
-        keywords = ["门店", "顾问", "管家", "排名", "代理商", "序号", "线索"]
-
-        if len(df) > 0:
-            for i in range(min(8, len(df))):
-                row_values = df.iloc[i].astype(str).str.cat(sep=",")
-                if any(k in row_values for k in keywords):
-                    header_row = i
-                    break
+        keywords = ["门店", "顾问", "管家", "排名", "代理商", "序号", "线索", "质检"]
+        for i in range(min(8, len(df))):
+            row_values = df.iloc[i].astype(str).str.cat(sep=",")
+            if any(k in row_values for k in keywords):
+                header_row = i
+                break
 
         df.columns = df.iloc[header_row]
-        df = df[header_row + 1:].reset_index(drop=True)
+        df = df[header_row + 1 :].reset_index(drop=True)
 
         # 清理列名
         df.columns = (
@@ -206,6 +206,9 @@ def smart_read(file_path):
             .str.replace("\n", "", regex=False)
             .str.replace("\r", "", regex=False)
         )
+
+        # ✅ 去重列名
+        df.columns = dedupe_columns(df.columns)
 
         # 删除空列
         df = df.loc[:, df.columns.notna()]
@@ -217,12 +220,14 @@ def smart_read(file_path):
         st.error(f"读取文件系统级失败: {os.path.basename(file_path)} - {e}")
         return None
 
+
 def safe_div(df, num_col, denom_col):
     if num_col not in df.columns or denom_col not in df.columns:
         return 0
     num = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
     denom = pd.to_numeric(df[denom_col], errors="coerce").fillna(0)
     return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
+
 
 @st.cache_data(ttl=300)
 def process_data(path_f, path_d, path_a, store_rank_path):
@@ -235,19 +240,21 @@ def process_data(path_f, path_d, path_a, store_rank_path):
         if raw_f is None or raw_d is None or raw_a is None or raw_s is None:
             return None, None
 
-        # --- A. 漏斗表处理 ---
+        # --- A. 漏斗表 ---
         f_cols = raw_f.columns
-        col_store = next((c for c in f_cols if "门店" in c or "代理" in c), "门店名称")
-        col_name  = next((c for c in f_cols if "顾问" in c or "管家" in c), "邀约专员/管家")
-        col_leads = next((c for c in f_cols if "有效线索" in c or "线索量" in c), "线索量")
-        col_visits = next((c for c in f_cols if "到店" in c and "率" not in c), "到店量")
+        col_store = next((c for c in f_cols if "门店" in str(c) or "代理" in str(c)), "门店名称")
+        col_name = next((c for c in f_cols if "顾问" in str(c) or "管家" in str(c)), "邀约专员/管家")
+        col_leads = next((c for c in f_cols if "有效线索" in str(c) or "线索量" in str(c)), "线索量")
+        col_visits = next((c for c in f_cols if "到店" in str(c) and "率" not in str(c)), "到店量")
 
-        df_f = raw_f.rename(columns={
-            col_store: "门店名称",
-            col_name: "邀约专员/管家",
-            col_leads: "线索量",
-            col_visits: "到店量"
-        })
+        df_f = raw_f.rename(
+            columns={
+                col_store: "门店名称",
+                col_name: "邀约专员/管家",
+                col_leads: "线索量",
+                col_visits: "到店量",
+            }
+        )
 
         mask_sub = df_f["邀约专员/管家"].astype(str).str.contains("小计", na=False)
         df_store_data = df_f[mask_sub].copy()
@@ -269,17 +276,26 @@ def process_data(path_f, path_d, path_a, store_rank_path):
             "政策相关": "S_Policy",
             "明确到店时间": "S_Time",
         }
-        wechat_raw = next((c for c in raw_d.columns if "微信" in c and "添加" in c), "添加微信")
         df_d = raw_d.rename(columns=d_map)
-        df_d["S_Wechat"] = df_d[wechat_raw] if wechat_raw in df_d.columns else 0
+
+        # ✅ 多列安全：匹配所有“添加微信”相关列，取第一列
+        wechat_cols = [c for c in df_d.columns if ("微信" in str(c) and "添加" in str(c))]
+        if wechat_cols:
+            df_d["S_Wechat"] = pd.to_numeric(df_d[wechat_cols].iloc[:, 0], errors="coerce").fillna(0)
+        else:
+            df_d["S_Wechat"] = 0
+
+        # 兜底：若顾问列名不同
+        if "邀约专员/管家" not in df_d.columns:
+            if "管家" in df_d.columns:
+                df_d.rename(columns={"管家": "邀约专员/管家"}, inplace=True)
+            elif "顾问" in df_d.columns:
+                df_d.rename(columns={"顾问": "邀约专员/管家"}, inplace=True)
 
         num_cols = ["质检总分", "S_60s", "S_Time", "S_Needs", "S_Car", "S_Policy", "S_Wechat"]
         for c in num_cols:
             if c in df_d.columns:
                 df_d[c] = pd.to_numeric(df_d[c], errors="coerce")
-
-        if "邀约专员/管家" not in df_d.columns and "管家" in raw_d.columns:
-            df_d.rename(columns={"管家": "邀约专员/管家"}, inplace=True)
 
         # --- C. 门店排名表 ---
         s_map = {
@@ -289,30 +305,34 @@ def process_data(path_f, path_d, path_a, store_rank_path):
             "政策相关": "S_Policy",
             "明确到店时间": "S_Time",
         }
-        s_wechat_raw = next((c for c in raw_s.columns if "微信" in c and "添加" in c), "添加微信")
-        s_store_raw  = next((c for c in raw_s.columns if "门店" in c and "ID" not in c), "门店名称")
-
+        s_store_raw = next((c for c in raw_s.columns if "门店" in str(c) and "ID" not in str(c)), "门店名称")
         df_s = raw_s.rename(columns={**s_map, s_store_raw: "门店名称"})
-        df_s["S_Wechat"] = df_s[s_wechat_raw] if s_wechat_raw in df_s.columns else 0
 
-        for c in ["质检总分", "S_60s", "S_Time"]:
+        # ✅ 多列安全：门店排名表的“添加微信”列
+        s_wechat_cols = [c for c in df_s.columns if ("微信" in str(c) and "添加" in str(c))]
+        if s_wechat_cols:
+            df_s["S_Wechat"] = pd.to_numeric(df_s[s_wechat_cols].iloc[:, 0], errors="coerce").fillna(0)
+        else:
+            df_s["S_Wechat"] = 0
+
+        for c in ["质检总分", "S_60s", "S_Time", "S_Needs", "S_Car", "S_Policy", "S_Wechat"]:
             if c in df_s.columns:
                 df_s[c] = pd.to_numeric(df_s[c], errors="coerce")
 
         # --- D. AMS表 ---
         a_map = {}
         for c in raw_a.columns:
-            if "接通" in c and "线索" in c and "率" not in c:
+            sc = str(c)
+            if "接通" in sc and "线索" in sc and "率" not in sc:
                 a_map[c] = "conn_num"
-            if "外呼" in c and "线索" in c and "需" not in c and "率" not in c:
+            if "外呼" in sc and "线索" in sc and "需" not in sc and "率" not in sc:
                 a_map[c] = "conn_denom"
-            if "管家" in c or "顾问" in c:
+            if "管家" in sc or "顾问" in sc:
                 a_map[c] = "邀约专员/管家"
-            if "平均通话时长" in c:
+            if "平均通话时长" in sc:
                 a_map[c] = "通话时长"
 
         df_a = raw_a.rename(columns=a_map)
-
         for c in ["conn_num", "conn_denom", "通话时长"]:
             if c not in df_a.columns:
                 df_a[c] = 0
@@ -344,9 +364,11 @@ def process_data(path_f, path_d, path_a, store_rank_path):
 
     except Exception as e:
         import traceback
+
         st.error(f"数据处理逻辑错误: {e}")
         st.text(traceback.format_exc())
         return None, None
+
 
 # ================= 5. 界面渲染 =================
 store_rank_path = get_store_rank_path()
@@ -421,12 +443,11 @@ if has_data:
             show_cols = [c for c in show_cols if c in current_df.columns]
 
             if not current_df.empty and show_cols:
-                st.dataframe(
-                    current_df[show_cols].sort_values("线索量", ascending=False) if "线索量" in current_df.columns else current_df[show_cols],
-                    use_container_width=True,
-                    height=400,
-                    hide_index=True,
-                )
+                if "线索量" in current_df.columns:
+                    view_df = current_df[show_cols].sort_values("线索量", ascending=False)
+                else:
+                    view_df = current_df[show_cols]
+                st.dataframe(view_df, use_container_width=True, height=400, hide_index=True)
             else:
                 st.warning("暂无数据")
 else:
