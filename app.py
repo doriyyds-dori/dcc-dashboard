@@ -36,6 +36,35 @@ PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
 PATH_S_XLSX = os.path.join(DATA_DIR, "store_rank.xlsx")
 PATH_S_CSV = os.path.join(DATA_DIR, "store_rank.csv")
 
+# ✅ 5) 门店归属维表（区域经理/省份/城市/门店名称）
+STORE_MAP_PATH = "/mnt/data/代理商名称归属.xlsx"   # 你已上传到这个路径
+
+
+def get_store_map_df():
+    """读取门店归属表；若不存在或列不齐，返回 None（自动回退到旧的门店下拉）。"""
+    if not os.path.exists(STORE_MAP_PATH):
+        return None
+    try:
+        m = pd.read_excel(STORE_MAP_PATH)
+        m.columns = m.columns.astype(str).str.strip()
+
+        # 兼容：有些文件用“商务经理”而不是“区域经理”
+        if "商务经理" in m.columns and "区域经理" not in m.columns:
+            m = m.rename(columns={"商务经理": "区域经理"})
+
+        need_cols = {"区域经理", "省份", "城市", "门店名称"}
+        if not need_cols.issubset(set(m.columns)):
+            return None
+
+        for c in ["区域经理", "省份", "城市", "门店名称"]:
+            m[c] = m[c].astype(str).str.strip()
+
+        m = m[m["门店名称"].notna() & (m["门店名称"].astype(str).str.strip() != "")]
+        m = m.drop_duplicates(subset=["区域经理", "省份", "城市", "门店名称"])
+        return m
+    except Exception:
+        return None
+
 
 def save_uploaded_file(uploaded_file, save_path: str) -> bool:
     try:
@@ -622,18 +651,84 @@ if has_data:
                 unsafe_allow_html=True,
             )
 
+        # ✅ 新增：标题口径默认值（用于 rank_title 动态显示）
+        filter_badge = "全体"
+
         with col_filter:
+            # === 原有：拿到所有门店（用于兜底/交集）===
             if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
-                all_stores = sorted(list(df_stores["门店名称"].dropna().unique()))
+                all_stores = sorted(list(df_stores["门店名称"].dropna().astype(str).str.strip().unique()))
             else:
-                all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().unique()))
-            store_options = ["全部"] + all_stores
-            selected_store = st.selectbox("🏭 切换门店视图", store_options)
+                all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
+
+            # === 新增：层级联动筛选（区域经理->省份->城市->门店）===
+            store_map = get_store_map_df()
+            allowed_stores = all_stores[:]  # 默认不过滤（等同“全体”）
+
+            if store_map is None:
+                # 归属表缺失/列不齐：回退到旧行为（只留一个门店下拉）
+                store_options = ["全部"] + all_stores
+                selected_store = st.selectbox("🏭 切换门店视图", store_options)
+            else:
+                # ① 区域经理
+                mgr_opts = ["全体"] + sorted(store_map["区域经理"].dropna().astype(str).str.strip().unique().tolist())
+                sel_mgr = st.selectbox("区域经理", mgr_opts, key="sel_mgr")
+
+                tmp = store_map if sel_mgr == "全体" else store_map[store_map["区域经理"] == sel_mgr]
+
+                # ② 省份
+                prov_opts = ["全体"] + sorted(tmp["省份"].dropna().astype(str).str.strip().unique().tolist())
+                sel_prov = st.selectbox("省份", prov_opts, key="sel_prov")
+
+                tmp2 = tmp if sel_prov == "全体" else tmp[tmp["省份"] == sel_prov]
+
+                # ③ 城市
+                city_opts = ["全体"] + sorted(tmp2["城市"].dropna().astype(str).str.strip().unique().tolist())
+                sel_city = st.selectbox("城市", city_opts, key="sel_city")
+
+                tmp3 = tmp2 if sel_city == "全体" else tmp2[tmp2["城市"] == sel_city]
+
+                # ④ 门店（受上级约束，并且只展示当前数据里存在的门店）
+                store_opts = ["全体"] + sorted([s for s in tmp3["门店名称"].dropna().astype(str).str.strip().unique().tolist() if s in set(all_stores)])
+                sel_store = st.selectbox("门店名称", store_opts, key="sel_store")
+
+                # 计算允许的门店清单
+                mm = store_map.copy()
+                if sel_mgr != "全体":
+                    mm = mm[mm["区域经理"] == sel_mgr]
+                if sel_prov != "全体":
+                    mm = mm[mm["省份"] == sel_prov]
+                if sel_city != "全体":
+                    mm = mm[mm["城市"] == sel_city]
+                if sel_store != "全体":
+                    mm = mm[mm["门店名称"] == sel_store]
+
+                allowed_stores = sorted([s for s in mm["门店名称"].dropna().astype(str).str.strip().unique().tolist() if s in set(all_stores)])
+
+                # 口径展示（用于 rank_title 动态）
+                parts = []
+                if sel_mgr != "全体": parts.append(sel_mgr)
+                if sel_prov != "全体": parts.append(sel_prov)
+                if sel_city != "全体": parts.append(sel_city)
+                if sel_store != "全体": parts.append(sel_store)
+                filter_badge = " / ".join(parts) if parts else "全体"
+
+                st.caption(f"当前筛选：{filter_badge}")
+
+                # ✅ 关键：只看门店口径，不展示管家/顾问明细
+                selected_store = "全部"
+
+            # === 将筛选结果应用到两张表（只过滤门店范围，不改变字段/结构）===
+            if allowed_stores is not None:
+                if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
+                    df_stores = df_stores[df_stores["门店名称"].astype(str).str.strip().isin(allowed_stores)].copy()
+                if df_advisors is not None and not df_advisors.empty and "门店名称" in df_advisors.columns:
+                    df_advisors = df_advisors[df_advisors["门店名称"].astype(str).str.strip().isin(allowed_stores)].copy()
 
         if selected_store == "全部":
             current_df = df_stores.copy() if df_stores is not None else pd.DataFrame()
             current_df["名称"] = current_df.get("门店名称", "")
-            rank_title = "🏆 全区门店排名"
+            rank_title = f"🏆 {filter_badge} 门店排名"   # ✅ 动态标题
             kpi_leads = current_df.get("线索量", pd.Series(dtype=float)).sum()
             kpi_visits = current_df.get("到店量", pd.Series(dtype=float)).sum()
             kpi_rate = kpi_visits / kpi_leads if kpi_leads > 0 else 0
