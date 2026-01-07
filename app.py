@@ -432,7 +432,32 @@ with st.sidebar:
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"], key="up_a")
             new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"], key="up_s")
 
-            # 已取消：异常邮件功能（避免环境/账号配置导致更新失败）
+            # ✅ 已取消：异常邮件功能（避免环境/账号配置导致更新失败）
+
+            if st.button("🚀 确认更新数据"):
+                if new_f and new_d and new_a and new_s:
+                    with st.spinner("正在保存数据..."):
+                        save_uploaded_file(new_f, PATH_F)
+                        save_uploaded_file(new_d, PATH_D)
+                        save_uploaded_file(new_a, PATH_A)
+
+                        # 门店排名：按真实后缀保存，避免 xlsx 被误存为 csv 造成乱码
+                        if str(new_s.name).lower().endswith(".xlsx"):
+                            # 删除旧 csv（如果存在）
+                            if os.path.exists(PATH_S_CSV):
+                                try:
+                                    os.remove(PATH_S_CSV)
+                                except Exception:
+                                    pass
+                            save_uploaded_file(new_s, PATH_S_XLSX)
+                        else:
+                            # 删除旧 xlsx（如果存在）
+                            if os.path.exists(PATH_S_XLSX):
+                                try:
+                                    os.remove(PATH_S_XLSX)
+                                except Exception:
+                                    pass
+                            save_uploaded_file(new_s, PATH_S_CSV)
 
                     st.success("更新完成，正在刷新...")
                     st.rerun()
