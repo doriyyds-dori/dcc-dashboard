@@ -100,11 +100,7 @@ LAST_UPDATE_FILE = os.path.join(DATA_DIR, "_last_upload_time.txt")
 
 
 def get_data_update_time(store_rank_path: str | None):
-    """返回【最新一次上传数据报】的时间。
-
-    优先读取 _last_upload_time.txt（点击“确认更新数据”时写入）。
-    若不存在，则回退到 4 个数据文件的最新修改时间。
-    """
+    """返回【最新一次上传数据报】的时间。"""
     # 1) 以“上传动作时间”为准
     if os.path.exists(LAST_UPDATE_FILE):
         try:
@@ -134,7 +130,7 @@ def get_data_update_time(store_rank_path: str | None):
     return datetime.fromtimestamp(ts)
 
 
-# ================= 3. 工具函数（读取/清洗/计算）（读取/清洗/计算） =================
+# ================= 3. 工具函数（读取/清洗/计算） =================
 def dedupe_columns(columns):
     """把重复列名变成: 列名, 列名__1, 列名__2 ..."""
     seen = {}
@@ -151,22 +147,18 @@ def dedupe_columns(columns):
 
 
 def smart_read(file_path: str, is_rank_file: bool = False):
-    """鲁棒读取（xlsx/csv/误后缀 xlsx）+ 自动找表头 + 列名去重。
-
-    - 误把 xlsx 存成 csv 后缀：通过文件签名 PK.. 识别并按 xlsx 读
-    - csv：多编码尝试
-    - 自动在前 12 行找表头（适配门店排名表第一行是标题）
-    """
+    """鲁棒读取 + 智能表头定位（打分制，避免误读标题行）。"""
     if not file_path or not os.path.exists(file_path):
         return None
 
     df = None
 
+    # 1. 尝试读取
     # 兜底：签名判断（xlsx 是 zip：PK..）
     try:
         with open(file_path, "rb") as f:
             sig = f.read(4)
-        if sig == b"PK":
+        if sig == b"PK\x03\x04":  # xlsx zip header
             df = pd.read_excel(file_path, header=None)
     except Exception:
         pass
@@ -192,20 +184,33 @@ def smart_read(file_path: str, is_rank_file: bool = False):
     if df is None or df.empty:
         return None
 
-    # 智能找表头
-    keywords = ["门店", "顾问", "管家", "排名", "代理商", "序号", "线索", "质检", "添加微信"]
-    header_row = 0
-
+    # 2. 智能找表头（改进：使用打分制，而非“遇到第一个就停”）
+    # 很多报表第一行是标题（如“线索报表”），只命中一个关键词，而真正的表头会命中多个。
+    keywords = [
+        "门店", "顾问", "管家", "排名", "代理商", "序号", "线索", "质检", "添加微信",
+        "DCC", "接通", "外呼", "省份", "城市", "车系", "状态"
+    ]
+    
+    best_row = 0
+    max_matches = 0
+    
     search_rows = 15 if is_rank_file else 12
+    
     for i in range(min(search_rows, len(df))):
-        row_values = df.iloc[i].astype(str).str.cat(sep=",")
-        if any(k in row_values for k in keywords):
-            header_row = i
-            break
+        # 把这一行拼成字符串搜索
+        row_values = df.iloc[i].astype(str).str.cat(sep=",").strip()
+        matches = sum(1 for k in keywords if k in row_values)
+        
+        # 只要这一行的命中数更多，就更新最佳行（优先取命中多的，避免取到只有一两个词的标题行）
+        if matches > max_matches:
+            max_matches = matches
+            best_row = i
 
-    df.columns = df.iloc[header_row]
-    df = df[header_row + 1 :].reset_index(drop=True)
+    # 应用表头
+    df.columns = df.iloc[best_row]
+    df = df[best_row + 1 :].reset_index(drop=True)
 
+    # 清洗列名
     df.columns = (
         df.columns.astype(str)
         .str.strip()
@@ -242,10 +247,16 @@ def safe_div(df: pd.DataFrame, num_col: str, denom_col: str):
 
 
 def _to_1d_numeric(x):
-    """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。"""
+    """把 Series 或 DataFrame 压成 1 列数值 Series，并自动清洗千分位逗号。"""
     if isinstance(x, pd.DataFrame):
-        tmp = x.apply(pd.to_numeric, errors="coerce")
-        return tmp.bfill(axis=1).iloc[:, 0].fillna(0)
+        # 优先取第一列
+        x = x.iloc[:, 0]
+    
+    # 清洗：转字符串 -> 去逗号 -> 转数字
+    # 这能解决 "1,234" 被 pandas 读成 NaN 的问题
+    if hasattr(x, 'astype'):
+        x = x.astype(str).str.replace(',', '', regex=False)
+
     return pd.to_numeric(x, errors="coerce").fillna(0)
 
 
@@ -315,8 +326,8 @@ def process_data(path_f, path_d, path_a, path_s):
         df_advisor_data = df_f[~mask_sub & ~mask_bad].copy()
 
         for df in [df_store_data, df_advisor_data]:
-            df["线索量"] = pd.to_numeric(df.get("线索量", 0), errors="coerce").fillna(0)
-            df["到店量"] = pd.to_numeric(df.get("到店量", 0), errors="coerce").fillna(0)
+            df["线索量"] = _to_1d_numeric(df.get("线索量", 0))
+            df["到店量"] = _to_1d_numeric(df.get("到店量", 0))
 
             if "Excel_Rate" in df.columns:
                 clean_percent_col(df, "Excel_Rate")
@@ -353,7 +364,8 @@ def process_data(path_f, path_d, path_a, path_s):
         score_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         for c in score_cols:
             if c in df_d.columns:
-                df_d[c] = pd.to_numeric(df_d[c], errors="coerce")
+                df_d[c] = _to_1d_numeric(df_d[c])
+                
         if "邀约专员/管家" not in df_d.columns:
             df_d["邀约专员/管家"] = ""
         df_d = df_d[["邀约专员/管家"] + [c for c in score_cols if c in df_d.columns]]
@@ -470,7 +482,7 @@ def process_data(path_f, path_d, path_a, path_s):
         cols_to_fill_zero = ["线索量", "到店量", "通话时长"] + all_ams_calc_cols
         for c in cols_to_fill_zero:
             if c in full_advisors.columns:
-                full_advisors[c] = pd.to_numeric(full_advisors[c], errors="coerce").fillna(0)
+                full_advisors[c] = _to_1d_numeric(full_advisors[c])
 
         ams_agg_dict = {c: "sum" for c in all_ams_calc_cols}
         if "门店名称" in full_advisors.columns and all(c in full_advisors.columns for c in all_ams_calc_cols):
