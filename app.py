@@ -268,12 +268,29 @@ def safe_div(df: pd.DataFrame, num_col: str, denom_col: str):
     return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
 
 
+# ✅ 功能1：修复 AMS 数值全 0（清理逗号千分位/空格/% 等）
 def _to_1d_numeric(x):
-    """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。"""
+    """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。
+    额外增强：清理逗号千分位、空格、百分号等，避免 to_numeric 全部变 NaN -> 0。
+    """
+    def _clean_to_num(s: pd.Series) -> pd.Series:
+        if pd.api.types.is_numeric_dtype(s):
+            return pd.to_numeric(s, errors="coerce").fillna(0)
+
+        ss = s.astype(str).str.strip()
+        ss = ss.str.replace("，", ",", regex=False)
+        ss = ss.str.replace(",", "", regex=False)
+        ss = ss.str.replace(" ", "", regex=False)
+        ss = ss.str.replace("%", "", regex=False)
+
+        ss = ss.replace({"nan": "", "None": "", "—": "", "-": "", "－": "", "": np.nan})
+        return pd.to_numeric(ss, errors="coerce").fillna(0)
+
     if isinstance(x, pd.DataFrame):
-        tmp = x.apply(pd.to_numeric, errors="coerce")
+        tmp = x.apply(_clean_to_num)
         return tmp.bfill(axis=1).iloc[:, 0].fillna(0)
-    return pd.to_numeric(x, errors="coerce").fillna(0)
+
+    return _clean_to_num(x)
 
 
 def _pick_first_col(df: pd.DataFrame, include_keywords, exclude_keywords=None):
@@ -346,7 +363,6 @@ def process_data(path_f, path_d, path_a, path_s):
             rename_dict[col_excel_rate] = "Excel_Rate"
 
         df_f = raw_f.rename(columns=rename_dict)
-        # 防止 rename 后出现重复列名（会导致 df['门店名称'] 变成 DataFrame）
         df_f.columns = dedupe_columns(df_f.columns)
 
         # 小计/合计行
@@ -369,7 +385,6 @@ def process_data(path_f, path_d, path_a, path_s):
 
             df["线索到店率"] = (df["线索到店率_数值"] * 100).map("{:.1f}%".format)
 
-        # ✅ 防止和门店排名表的质检列重名导致 merge 生成 _x/_y：
         store_qc_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
 
@@ -387,10 +402,8 @@ def process_data(path_f, path_d, path_a, path_s):
             }
         )
 
-        # 防止 rename 后出现重复列名
         df_d.columns = dedupe_columns(df_d.columns)
 
-        # 添加微信：可能重复列名，取第一列
         wechat_cols = [c for c in df_d.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
         if wechat_cols:
             df_d["S_Wechat"] = _to_1d_numeric(df_d[wechat_cols])
@@ -509,6 +522,14 @@ def process_data(path_f, path_d, path_a, path_s):
         if "通话时长" not in df_a.columns:
             df_a["通话时长"] = 0
         df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
+
+        # ✅ 功能2：AMS 求和自检（转换后），不影响计算
+        try:
+            st.session_state["_ams_sum_debug"] = {
+                c: float(pd.to_numeric(df_a[c], errors="coerce").fillna(0).sum()) for c in all_ams_calc_cols
+            }
+        except Exception:
+            pass
 
         df_a["外呼接通率"] = safe_div(df_a, "conn_num", "conn_denom")
         df_a["DCC及时处理率"] = safe_div(df_a, "timely_num", "timely_denom")
@@ -696,10 +717,15 @@ if has_data:
             map_mtime = datetime.fromtimestamp(os.path.getmtime(map_path)).strftime("%Y-%m-%d %H:%M:%S") if map_exists else "—"
             st.caption(f"🧭 归属表自检：{'✅已检测到' if map_exists else '❌未检测到'} ｜ 路径：{map_path or '无'} ｜ 修改时间：{map_mtime}")
 
-            # ✅ 自检行：AMS 命中列（只展示，不影响功能）
+            # ✅ AMS 自检（命中列）
             dbg = st.session_state.get("_ams_debug", None)
             if dbg:
                 st.caption(f"📌 AMS自检：列数={dbg.get('ams_cols_count')} ｜ 命中={dbg.get('ams_hit_map')}")
+
+            # ✅ AMS 自检（转换后求和）
+            sum_dbg = st.session_state.get("_ams_sum_debug", None)
+            if sum_dbg:
+                st.caption(f"📌 AMS求和自检（转换后）: {sum_dbg}")
 
             store_map = get_store_map_df()
             allowed_stores = all_stores[:]
@@ -834,7 +860,11 @@ if has_data:
                 )
                 fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
                 if "S_60s" in plot_df_vis.columns:
-                    fig_p1.add_hline(y=pd.to_numeric(plot_df_vis["S_60s"], errors="coerce").fillna(0).mean(), line_dash="dash", line_color="gray")
+                    fig_p1.add_hline(
+                        y=pd.to_numeric(plot_df_vis["S_60s"], errors="coerce").fillna(0).mean(),
+                        line_dash="dash",
+                        line_color="gray",
+                    )
                 fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
                 st.plotly_chart(fig_p1, use_container_width=True)
             else:
@@ -847,7 +877,9 @@ if has_data:
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             plot_df_corr = plot_df_vis.copy()
 
-            plot_df_corr["线索到店率_显示"] = pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
+            plot_df_corr["线索到店率_显示"] = (
+                pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
+            )
 
             if x_axis_choice in plot_df_corr.columns:
                 plot_df_corr[x_axis_choice] = pd.to_numeric(plot_df_corr[x_axis_choice], errors="coerce").fillna(0).clip(0, 1)
