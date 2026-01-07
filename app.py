@@ -599,21 +599,70 @@ if has_data:
 
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             plot_df_corr = plot_df_vis.copy()
-            plot_df_corr["转化率%"] = pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0) * 100
 
+            # Y：线索到店率（小数），用于按百分比格式展示（保留1位小数）
+            plot_df_corr["线索到店率_显示"] = pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
+
+            # X：过程指标（小数），强制限制在 0%~100%
             if x_axis_choice in plot_df_corr.columns:
+                plot_df_corr[x_axis_choice] = pd.to_numeric(plot_df_corr[x_axis_choice], errors="coerce").fillna(0).clip(0, 1)
+
                 fig_p2 = px.scatter(
                     plot_df_corr,
                     x=x_axis_choice,
-                    y="转化率%",
+                    y="线索到店率_显示",
                     size="线索量" if "线索量" in plot_df_corr.columns else None,
                     color="质检总分_显示",
                     hover_name="名称",
-                    labels={x_axis_choice: x_axis_choice, "转化率%": "线索到店率(%)"},
+                    labels={x_axis_choice: x_axis_choice, "线索到店率_显示": "线索到店率"},
                     color_continuous_scale="Blues",
                     height=300,
                 )
-                fig_p2.update_layout(xaxis=dict(tickformat=".0%"))
+
+                # 坐标轴：X 最大不超过 100%，Y 按百分比显示 1 位小数
+                fig_p2.update_xaxes(range=[0, 1], tickformat=".0%")
+                fig_p2.update_yaxes(tickformat=".1%")
+
+                # Hover：把到店率按百分比 1 位小数展示
+                if "线索量" in plot_df_corr.columns:
+                    fig_p2.update_traces(
+                        customdata=np.stack(
+                            (
+                                pd.to_numeric(plot_df_corr["线索量"], errors="coerce").fillna(0),
+                                plot_df_corr[x_axis_choice],
+                                plot_df_corr["线索到店率_显示"],
+                                pd.to_numeric(plot_df_corr["质检总分_显示"], errors="coerce").fillna(0),
+                            ),
+                            axis=-1,
+                        ),
+                        hovertemplate=(
+                            "<b>%{hovertext}</b><br><br>"
+                            "线索量: %{customdata[0]:,.0f}<br>"
+                            + f"{x_axis_choice}: %{{customdata[1]:.1%}}<br>"
+                            "线索到店率: %{customdata[2]:.1%}<br>"
+                            "质检总分: %{customdata[3]:.1f}<br>"
+                            "<extra></extra>"
+                        ),
+                    )
+                else:
+                    fig_p2.update_traces(
+                        customdata=np.stack(
+                            (
+                                plot_df_corr[x_axis_choice],
+                                plot_df_corr["线索到店率_显示"],
+                                pd.to_numeric(plot_df_corr["质检总分_显示"], errors="coerce").fillna(0),
+                            ),
+                            axis=-1,
+                        ),
+                        hovertemplate=(
+                            "<b>%{hovertext}</b><br><br>"
+                            + f"{x_axis_choice}: %{{customdata[0]:.1%}}<br>"
+                            "线索到店率: %{customdata[1]:.1%}<br>"
+                            "质检总分: %{customdata[2]:.1f}<br>"
+                            "<extra></extra>"
+                        ),
+                    )
+
                 st.plotly_chart(fig_p2, use_container_width=True)
             else:
                 st.warning("当前视图缺少所选过程指标列，无法绘图")
