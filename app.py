@@ -38,7 +38,7 @@ PATH_S_CSV = os.path.join(DATA_DIR, "store_rank.csv")
 
 # ✅ 5) 门店归属维表：网页端上传后保存到 data_store（一次上传，后续自动读取）
 PATH_M = os.path.join(DATA_DIR, "store_map.xlsx")
-# 兼容：如果你确实在服务器本地也放了一个固定路径文件，可以作为兜底（可选）
+# 兼容兜底（可选）：服务器本地固定放置的归属表路径
 STORE_MAP_FALLBACK = "/mnt/data/代理商名称归属.xlsx"
 
 
@@ -100,12 +100,7 @@ LAST_UPDATE_FILE = os.path.join(DATA_DIR, "_last_upload_time.txt")
 
 
 def get_data_update_time(store_rank_path: str | None):
-    """返回【最新一次上传数据报】的时间。
-
-    优先读取 _last_upload_time.txt（点击“确认更新数据”时写入）。
-    若不存在，则回退到 4 个数据文件的最新修改时间。
-    """
-    # 1) 以“上传动作时间”为准
+    """返回【最新一次上传数据报】的时间。优先读 _last_upload_time.txt，否则取文件修改时间。"""
     if os.path.exists(LAST_UPDATE_FILE):
         try:
             txt = open(LAST_UPDATE_FILE, "r", encoding="utf-8").read().strip()
@@ -114,7 +109,6 @@ def get_data_update_time(store_rank_path: str | None):
         except Exception:
             pass
 
-    # 2) 回退：文件修改时间
     paths = [PATH_F, PATH_D, PATH_A]
     if store_rank_path:
         paths.append(store_rank_path)
@@ -134,7 +128,7 @@ def get_data_update_time(store_rank_path: str | None):
     return datetime.fromtimestamp(ts)
 
 
-# ================= 3. 工具函数（读取/清洗/计算）（读取/清洗/计算） =================
+# ================= 3. 工具函数（读取/清洗/计算） =================
 def dedupe_columns(columns):
     """把重复列名变成: 列名, 列名__1, 列名__2 ..."""
     seen = {}
@@ -150,26 +144,40 @@ def dedupe_columns(columns):
     return out
 
 
-def smart_read(file_path: str, is_rank_file: bool = False):
+def smart_read(file_path: str, is_rank_file: bool = False, prefer_sheet: str | None = None, require_sheet: bool = False):
     """鲁棒读取（xlsx/csv/误后缀 xlsx）+ 自动找表头 + 列名去重。
 
-    - 误把 xlsx 存成 csv 后缀：通过文件签名 PK.. 识别并按 xlsx 读
-    - csv：多编码尝试
-    - 自动在前 12 行找表头（适配门店排名表第一行是标题）
+    严格模式：
+    - 若是 Excel 且 require_sheet=True 且 prefer_sheet 不存在：直接抛错，不回退。
     """
     if not file_path or not os.path.exists(file_path):
         return None
 
     df = None
 
+    def _read_excel_with_prefer(path: str):
+        xls = pd.ExcelFile(path)
+        if prefer_sheet:
+            if prefer_sheet in xls.sheet_names:
+                return pd.read_excel(xls, sheet_name=prefer_sheet, header=None)
+            if require_sheet:
+                raise ValueError(f"漏斗指标文件缺少指定Sheet：'{prefer_sheet}'。当前包含：{xls.sheet_names}")
+            # 非严格：回退第一个sheet（本次你不需要，但保留能力）
+            return pd.read_excel(xls, sheet_name=0, header=None)
+        return pd.read_excel(xls, sheet_name=0, header=None)
+
     # 兜底：签名判断（xlsx 是 zip：PK..）
     try:
         with open(file_path, "rb") as f:
             sig = f.read(4)
-        if sig == b"PK":
-            df = pd.read_excel(file_path, header=None)
-    except Exception:
-        pass
+        if sig == b"PK\x03\x04":
+            df = _read_excel_with_prefer(file_path)
+    except Exception as e:
+        # 严格模式下，缺sheet要把错误抛出去给上层显示
+        if require_sheet and prefer_sheet:
+            raise
+        # 非严格：继续走后面分支
+        df = None
 
     if df is None:
         is_csv = str(file_path).lower().endswith((".csv", ".txt"))
@@ -185,8 +193,10 @@ def smart_read(file_path: str, is_rank_file: bool = False):
                     continue
         else:
             try:
-                df = pd.read_excel(file_path, header=None)
+                df = _read_excel_with_prefer(file_path)
             except Exception:
+                if require_sheet and prefer_sheet:
+                    raise
                 return None
 
     if df is None or df.empty:
@@ -215,7 +225,6 @@ def smart_read(file_path: str, is_rank_file: bool = False):
 
     df.columns = dedupe_columns(df.columns)
 
-    # 删掉全空列
     df = df.loc[:, df.columns.notna()]
     df = df.loc[:, df.columns != "nan"]
 
@@ -242,20 +251,10 @@ def safe_div(df: pd.DataFrame, num_col: str, denom_col: str):
 
 
 def _to_1d_numeric(x):
-    """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。"""
     if isinstance(x, pd.DataFrame):
         tmp = x.apply(pd.to_numeric, errors="coerce")
         return tmp.bfill(axis=1).iloc[:, 0].fillna(0)
     return pd.to_numeric(x, errors="coerce").fillna(0)
-
-
-def _pick_first_col(df: pd.DataFrame, include_keywords, exclude_keywords=None):
-    exclude_keywords = exclude_keywords or []
-    for c in df.columns:
-        s = str(c)
-        if all(k in s for k in include_keywords) and not any(x in s for x in exclude_keywords):
-            return c
-    return None
 
 
 def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
@@ -268,7 +267,6 @@ def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
 
 
 def _col_as_series(df: pd.DataFrame, col_name: str):
-    """df[col] 可能因为重复列名返回 DataFrame；这里统一压成 1D Series。"""
     if col_name not in df.columns:
         return None
     x = df[col_name]
@@ -280,7 +278,8 @@ def _col_as_series(df: pd.DataFrame, col_name: str):
 @st.cache_data(ttl=300)
 def process_data(path_f, path_d, path_a, path_s):
     try:
-        raw_f = smart_read(path_f)
+        # ✅ 严格：漏斗只读 sheet="漏斗指标"，找不到直接报错
+        raw_f = smart_read(path_f, prefer_sheet="漏斗指标", require_sheet=True)
         raw_d = smart_read(path_d)
         raw_a = smart_read(path_a)
         raw_s = smart_read(path_s, is_rank_file=True)
@@ -294,8 +293,7 @@ def process_data(path_f, path_d, path_a, path_s):
 
         col_leads = "线上_有效线索数" if "线上_有效线索数" in raw_f.columns else ("线索量" if "线索量" in raw_f.columns else _pick_any_col(raw_f, ["有效线索", "线索数"]))
         col_visits = "线上_到店数" if "线上_到店数" in raw_f.columns else ("到店量" if "到店量" in raw_f.columns else _pick_any_col(raw_f, ["到店数", "到店量"]))
-
-        col_excel_rate = _pick_any_col(raw_f, ["率"], exclude_keywords=["试驾", "成交"])  # 尽量拿到“到店率”那列
+        col_excel_rate = _pick_any_col(raw_f, ["率"], exclude_keywords=["试驾", "成交"])
 
         rename_dict = {store_col: "门店名称", name_col: "邀约专员/管家"}
         if col_leads:
@@ -507,7 +505,7 @@ def process_data(path_f, path_d, path_a, path_s):
         return None, None
 
 
-# ================= 4. 侧边栏逻辑（放到函数后，避免 NameError） =================
+# ================= 4. 侧边栏逻辑 =================
 with st.sidebar:
     st.header("⚙️ 管理面板")
 
@@ -529,18 +527,15 @@ with st.sidebar:
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"], key="up_a")
             new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"], key="up_s")
 
-            # ✅ 新增：归属表上传（一次上传后持久化到 data_store）
             new_m = st.file_uploader("5. 代理商名称归属(区域经理/省份/城市/门店)", type=["xlsx"], key="up_m")
 
             if st.button("🚀 确认更新数据"):
-                # 情况1：4个主数据齐全 -> 正常更新 4 表（归属表可选一起更）
                 if new_f and new_d and new_a and new_s:
                     with st.spinner("正在保存数据..."):
                         save_uploaded_file(new_f, PATH_F)
                         save_uploaded_file(new_d, PATH_D)
                         save_uploaded_file(new_a, PATH_A)
 
-                        # 门店排名：按真实后缀保存，避免 xlsx 被误存为 csv 造成乱码
                         if str(new_s.name).lower().endswith(".xlsx"):
                             if os.path.exists(PATH_S_CSV):
                                 try:
@@ -556,11 +551,9 @@ with st.sidebar:
                                     pass
                             save_uploaded_file(new_s, PATH_S_CSV)
 
-                        # ✅ 归属表：可选一起上传
                         if new_m is not None:
                             save_uploaded_file(new_m, PATH_M)
 
-                        # ✅ 写入“最新一次上传数据报时间”
                         try:
                             with open(LAST_UPDATE_FILE, "w", encoding="utf-8") as f:
                                 f.write(datetime.now().isoformat(timespec="seconds"))
@@ -570,7 +563,6 @@ with st.sidebar:
                     st.success("更新完成，正在刷新...")
                     st.rerun()
 
-                # 情况2：只上传了归属表 -> 允许单独更新归属表（不动原4表）
                 elif new_m is not None:
                     with st.spinner("正在保存归属表..."):
                         save_uploaded_file(new_m, PATH_M)
@@ -607,31 +599,28 @@ if has_data:
                 unsafe_allow_html=True,
             )
 
-        # ✅ 仅用于展示的口径徽标（不影响计算）
         filter_badge = "全体"
 
         with col_filter:
-            # 取当前数据里存在的门店（用于交集，避免归属表里出现“数据不存在”的门店）
             if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                 all_stores = sorted(list(df_stores["门店名称"].dropna().astype(str).str.strip().unique()))
             else:
                 all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
 
-            # ✅ 自检行：不影响功能（只展示归属表是否加载/路径/时间）
+            # ✅ 自检行（只展示，不影响功能）
             map_path = _resolve_store_map_path()
             map_exists = bool(map_path and os.path.exists(map_path))
             map_mtime = datetime.fromtimestamp(os.path.getmtime(map_path)).strftime("%Y-%m-%d %H:%M:%S") if map_exists else "—"
             st.caption(f"🧭 归属表自检：{'✅已检测到' if map_exists else '❌未检测到'} ｜ 路径：{map_path or '无'} ｜ 修改时间：{map_mtime}")
 
             store_map = get_store_map_df()
-            allowed_stores = all_stores[:]  # 默认不过滤（等同全体）
+            allowed_stores = all_stores[:]
 
             if store_map is None:
                 st.warning("未加载门店归属表（第5项）或列名不匹配（需：区域经理/省份/城市/门店名称）。将回退到【门店下拉】模式。")
                 store_options = ["全部"] + all_stores
                 selected_store = st.selectbox("🏭 切换门店视图", store_options)
             else:
-                # ✅ 新：层级联动（区域经理 -> 省份 -> 城市 -> 门店名称）
                 mgr_opts = ["全体"] + sorted(store_map["区域经理"].dropna().astype(str).str.strip().unique().tolist())
                 sel_mgr = st.selectbox("区域经理", mgr_opts, key="sel_mgr")
 
@@ -674,10 +663,8 @@ if has_data:
                 filter_badge = " / ".join(parts) if parts else "全体"
                 st.caption(f"当前筛选：{filter_badge}")
 
-                # ✅ 四级筛选默认仍是门店范围口径
                 selected_store = "全部" if sel_store == "全体" else sel_store
 
-            # 应用门店范围过滤（只过滤门店范围，不改字段/结构）
             if allowed_stores is not None:
                 if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                     df_stores = df_stores[df_stores["门店名称"].astype(str).str.strip().isin(allowed_stores)].copy()
@@ -773,7 +760,6 @@ if has_data:
 
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             plot_df_corr = plot_df_vis.copy()
-
             plot_df_corr["线索到店率_显示"] = pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
 
             if x_axis_choice in plot_df_corr.columns:
@@ -848,11 +834,7 @@ if has_data:
             st.markdown(f"### 🏆 {rank_title}")
             if all(c in current_df.columns for c in ["名称", "线索到店率", "线索到店率_数值"]):
                 rank_df = current_df[["名称", "线索到店率", "线索到店率_数值"]].copy()
-                if "质检总分" in current_df.columns:
-                    rank_df["质检总分"] = current_df["质检总分"]
-                else:
-                    rank_df["质检总分"] = 0
-
+                rank_df["质检总分"] = current_df["质检总分"] if "质检总分" in current_df.columns else 0
                 rank_df["Sort_Score"] = pd.to_numeric(rank_df["线索到店率_数值"], errors="coerce").fillna(-1)
                 rank_df = rank_df.sort_values("Sort_Score", ascending=False).head(15)
                 display_df = rank_df[["名称", "线索到店率", "质检总分"]]
@@ -924,11 +906,7 @@ if has_data:
                 if "线索量" in diag_df.columns:
                     diag_df = diag_df[pd.to_numeric(diag_df["线索量"], errors="coerce").fillna(0) > 0].copy()
 
-                if "邀约专员/管家" in diag_df.columns:
-                    diag_list = sorted(diag_df["邀约专员/管家"].dropna().astype(str).unique())
-                else:
-                    diag_list = []
-
+                diag_list = sorted(diag_df["邀约专员/管家"].dropna().astype(str).unique()) if "邀约专员/管家" in diag_df.columns else []
                 if diag_list:
                     selected_person = st.selectbox("🔍 选择该店邀约专员/管家：", diag_list)
                     p_row = df_advisors[df_advisors["邀约专员/管家"] == selected_person]
@@ -936,13 +914,12 @@ if has_data:
                         st.warning("找不到该人员明细")
                     else:
                         p = p_row.iloc[0]
-
                         d1, d2, d3 = st.columns([1, 1, 1.2])
+
                         with d1:
                             st.caption("转化漏斗 (RESULT)")
                             leads = float(pd.to_numeric(p.get("线索量", 0), errors="coerce") or 0)
                             visits = float(pd.to_numeric(p.get("到店量", 0), errors="coerce") or 0)
-
                             fig_f = go.Figure(
                                 go.Funnel(
                                     y=["线索量", "到店量"],
