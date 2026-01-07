@@ -55,7 +55,28 @@ def get_store_rank_path():
     return None
 
 
-# ================= 3. 工具函数（读取/清洗/计算） =================
+def get_data_update_time(store_rank_path: str | None):
+    """返回 4 个数据文件中最新的修改时间（本地保存/覆盖后会更新）。"""
+    paths = [PATH_F, PATH_D, PATH_A]
+    if store_rank_path:
+        paths.append(store_rank_path)
+
+    mtimes = []
+    for p in paths:
+        if p and os.path.exists(p):
+            try:
+                mtimes.append(os.path.getmtime(p))
+            except Exception:
+                pass
+
+    if not mtimes:
+        return None
+
+    ts = max(mtimes)
+    return datetime.fromtimestamp(ts)
+
+
+# ================= 3. 工具函数（读取/清洗/计算）（读取/清洗/计算） =================
 def dedupe_columns(columns):
     """把重复列名变成: 列名, 列名__1, 列名__2 ..."""
     seen = {}
@@ -502,9 +523,24 @@ if has_data:
     df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A, store_rank_path)
 
     if df_advisors is not None:
-        col_header, col_filter = st.columns([3, 1])
+        col_header, col_update, col_filter = st.columns([2.4, 1.2, 1])
         with col_header:
             st.title("Audi | DCC 效能看板")
+
+        with col_update:
+            upd = get_data_update_time(store_rank_path)
+            upd_text = upd.strftime("%Y-%m-%d %H:%M") if upd else "暂无"
+            st.markdown(
+                f"""
+                <div style='text-align:right; padding-top: 12px;'>
+                  <span style='display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid rgba(49, 51, 63, 0.18); background: rgba(49, 51, 63, 0.06); font-size: 12px;'>
+                    🕒 数据更新时间：<b>{upd_text}</b>
+                  </span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
         with col_filter:
             if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                 all_stores = sorted(list(df_stores["门店名称"].dropna().unique()))
