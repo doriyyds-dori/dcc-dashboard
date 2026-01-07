@@ -38,7 +38,7 @@ PATH_S_CSV = os.path.join(DATA_DIR, "store_rank.csv")
 
 # ✅ 5) 门店归属维表：网页端上传后保存到 data_store（一次上传，后续自动读取）
 PATH_M = os.path.join(DATA_DIR, "store_map.xlsx")
-# 兼容兜底（可选）：服务器本地固定放置的归属表路径
+# 兼容：如果你确实在服务器本地也放了一个固定路径文件，可以作为兜底（可选）
 STORE_MAP_FALLBACK = "/mnt/data/代理商名称归属.xlsx"
 
 
@@ -100,7 +100,12 @@ LAST_UPDATE_FILE = os.path.join(DATA_DIR, "_last_upload_time.txt")
 
 
 def get_data_update_time(store_rank_path: str | None):
-    """返回【最新一次上传数据报】的时间。"""
+    """返回【最新一次上传数据报】的时间。
+
+    优先读取 _last_upload_time.txt（点击“确认更新数据”时写入）。
+    若不存在，则回退到 4 个数据文件的最新修改时间。
+    """
+    # 1) 以“上传动作时间”为准
     if os.path.exists(LAST_UPDATE_FILE):
         try:
             txt = open(LAST_UPDATE_FILE, "r", encoding="utf-8").read().strip()
@@ -109,6 +114,7 @@ def get_data_update_time(store_rank_path: str | None):
         except Exception:
             pass
 
+    # 2) 回退：文件修改时间
     paths = [PATH_F, PATH_D, PATH_A]
     if store_rank_path:
         paths.append(store_rank_path)
@@ -128,7 +134,7 @@ def get_data_update_time(store_rank_path: str | None):
     return datetime.fromtimestamp(ts)
 
 
-# ================= 3. 工具函数（读取/清洗/计算） =================
+# ================= 3. 工具函数（读取/清洗/计算）（读取/清洗/计算） =================
 def dedupe_columns(columns):
     """把重复列名变成: 列名, 列名__1, 列名__2 ..."""
     seen = {}
@@ -144,45 +150,36 @@ def dedupe_columns(columns):
     return out
 
 
-def smart_read(
-    file_path: str,
-    is_rank_file: bool = False,
-    prefer_sheet: str | None = None,
-    require_sheet: bool = False,
-    min_header_non_empty: int = 1,
-):
+def smart_read(file_path: str, is_rank_file: bool = False, sheet_name: str | None = None, strict_sheet: bool = False):
     """鲁棒读取（xlsx/csv/误后缀 xlsx）+ 自动找表头 + 列名去重。
-    - prefer_sheet + require_sheet 用于严格读取指定 sheet（漏斗指标用）
-    - min_header_non_empty 用于避免“标题行”误判为表头（AMS 常见）
+    新增：
+    - sheet_name / strict_sheet：用于只读取指定 sheet（漏斗：只读「漏斗指标」，找不到就报错不回退）
     """
     if not file_path or not os.path.exists(file_path):
         return None
 
     df = None
 
-    def _read_excel_with_prefer(path: str):
-        xls = pd.ExcelFile(path)
-        if prefer_sheet:
-            if prefer_sheet in xls.sheet_names:
-                return pd.read_excel(xls, sheet_name=prefer_sheet, header=None)
-            if require_sheet:
-                raise ValueError(f"文件缺少指定Sheet：'{prefer_sheet}'。当前包含：{xls.sheet_names}")
-            return pd.read_excel(xls, sheet_name=0, header=None)
-        return pd.read_excel(xls, sheet_name=0, header=None)
-
+    # 兜底：签名判断（xlsx 是 zip：PK..）
     try:
         with open(file_path, "rb") as f:
             sig = f.read(4)
         if sig == b"PK\x03\x04":
-            df = _read_excel_with_prefer(file_path)
+            try:
+                df = pd.read_excel(file_path, header=None, sheet_name=sheet_name)
+            except ValueError as e:
+                if strict_sheet and sheet_name:
+                    raise ValueError(f"未找到工作表「{sheet_name}」") from e
+                df = pd.read_excel(file_path, header=None)
     except Exception:
-        if require_sheet and prefer_sheet:
-            raise
-        df = None
+        pass
 
     if df is None:
         is_csv = str(file_path).lower().endswith((".csv", ".txt"))
         if is_csv:
+            if strict_sheet and sheet_name:
+                # 严格模式下：你要求“漏斗指标”必须来自指定sheet，所以 csv 直接视为不符合
+                raise ValueError(f"漏斗指标表需为 Excel 且包含工作表「{sheet_name}」，当前却是 CSV/TXT")
             encodings = ["utf-8-sig", "gb18030", "utf-16"]
             for enc in encodings:
                 try:
@@ -194,26 +191,27 @@ def smart_read(
                     continue
         else:
             try:
-                df = _read_excel_with_prefer(file_path)
+                df = pd.read_excel(file_path, header=None, sheet_name=sheet_name)
+            except ValueError as e:
+                if strict_sheet and sheet_name:
+                    raise ValueError(f"未找到工作表「{sheet_name}」") from e
+                try:
+                    df = pd.read_excel(file_path, header=None)
+                except Exception:
+                    return None
             except Exception:
-                if require_sheet and prefer_sheet:
-                    raise
                 return None
 
     if df is None or df.empty:
         return None
 
+    # 智能找表头
     keywords = ["门店", "顾问", "管家", "排名", "代理商", "序号", "线索", "质检", "添加微信"]
     header_row = 0
 
     search_rows = 15 if is_rank_file else 12
     for i in range(min(search_rows, len(df))):
-        row = df.iloc[i]
-        non_empty_cnt = int(row.notna().sum())
-        if non_empty_cnt < int(min_header_non_empty):
-            continue
-
-        row_values = row.astype(str).str.cat(sep=",")
+        row_values = df.iloc[i].astype(str).str.cat(sep=",")
         if any(k in row_values for k in keywords):
             header_row = i
             break
@@ -227,7 +225,10 @@ def smart_read(
         .str.replace("\n", "", regex=False)
         .str.replace("\r", "", regex=False)
     )
+
     df.columns = dedupe_columns(df.columns)
+
+    # 删掉全空列
     df = df.loc[:, df.columns.notna()]
     df = df.loc[:, df.columns != "nan"]
 
@@ -253,35 +254,12 @@ def safe_div(df: pd.DataFrame, num_col: str, denom_col: str):
     return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
 
 
-def _pick_col_like(df: pd.DataFrame, base: str):
-    """优先返回 base；否则返回 base__1 / base__2 ... 中第一个匹配的列名。"""
-    if base in df.columns:
-        return base
-    for c in df.columns:
-        if str(c).startswith(base + "__"):
-            return c
-    return None
-
-
 def _to_1d_numeric(x):
-    """把 Series 或 DataFrame 压成 1 列数值 Series；增强清洗：逗号千分位/空格/%"""
-    def _clean_to_num(s: pd.Series) -> pd.Series:
-        if pd.api.types.is_numeric_dtype(s):
-            return pd.to_numeric(s, errors="coerce").fillna(0)
-
-        ss = s.astype(str).str.strip()
-        ss = ss.str.replace("，", ",", regex=False)
-        ss = ss.str.replace(",", "", regex=False)
-        ss = ss.str.replace(" ", "", regex=False)
-        ss = ss.str.replace("%", "", regex=False)
-        ss = ss.replace({"nan": "", "None": "", "—": "", "-": "", "－": "", "": np.nan})
-        return pd.to_numeric(ss, errors="coerce").fillna(0)
-
+    """把 Series 或（同名列导致的）DataFrame 压成 1 列数值 Series。"""
     if isinstance(x, pd.DataFrame):
-        tmp = x.apply(_clean_to_num)
+        tmp = x.apply(pd.to_numeric, errors="coerce")
         return tmp.bfill(axis=1).iloc[:, 0].fillna(0)
-
-    return _clean_to_num(x)
+    return pd.to_numeric(x, errors="coerce").fillna(0)
 
 
 def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
@@ -294,6 +272,7 @@ def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
 
 
 def _col_as_series(df: pd.DataFrame, col_name: str):
+    """df[col] 可能因为重复列名返回 DataFrame；这里统一压成 1D Series。"""
     if col_name not in df.columns:
         return None
     x = df[col_name]
@@ -305,14 +284,14 @@ def _col_as_series(df: pd.DataFrame, col_name: str):
 @st.cache_data(ttl=300)
 def process_data(path_f, path_d, path_a, path_s):
     try:
-        # ✅ 严格：漏斗只读 sheet="漏斗指标"，找不到直接报错不回退
-        raw_f = smart_read(path_f, prefer_sheet="漏斗指标", require_sheet=True)
+        # ✅ 漏斗：严格只读 sheet=「漏斗指标」，找不到就直接报错（不回退）
+        try:
+            raw_f = smart_read(path_f, sheet_name="漏斗指标", strict_sheet=True)
+        except Exception as e:
+            raise ValueError(f"漏斗指标表读取失败：{e}")
 
         raw_d = smart_read(path_d)
-
-        # ✅ AMS：更严表头识别（不改计算逻辑）
-        raw_a = smart_read(path_a, min_header_non_empty=5)
-
+        raw_a = smart_read(path_a)
         raw_s = smart_read(path_s, is_rank_file=True)
 
         if raw_f is None or raw_d is None or raw_a is None or raw_s is None:
@@ -324,7 +303,8 @@ def process_data(path_f, path_d, path_a, path_s):
 
         col_leads = "线上_有效线索数" if "线上_有效线索数" in raw_f.columns else ("线索量" if "线索量" in raw_f.columns else _pick_any_col(raw_f, ["有效线索", "线索数"]))
         col_visits = "线上_到店数" if "线上_到店数" in raw_f.columns else ("到店量" if "到店量" in raw_f.columns else _pick_any_col(raw_f, ["到店数", "到店量"]))
-        col_excel_rate = _pick_any_col(raw_f, ["率"], exclude_keywords=["试驾", "成交"])
+
+        col_excel_rate = _pick_any_col(raw_f, ["率"], exclude_keywords=["试驾", "成交"])  # 尽量拿到“到店率”那列
 
         rename_dict = {store_col: "门店名称", name_col: "邀约专员/管家"}
         if col_leads:
@@ -337,17 +317,22 @@ def process_data(path_f, path_d, path_a, path_s):
         df_f = raw_f.rename(columns=rename_dict)
         df_f.columns = dedupe_columns(df_f.columns)
 
+        # 小计/合计行
         mask_sub = df_f["邀约专员/管家"].astype(str).str.contains("小计|合计|总计", na=False)
         df_store_data = df_f[mask_sub].copy()
 
+        # 顾问明细：排除小计/空/分隔符
         mask_bad = df_f["邀约专员/管家"].astype(str).str.strip().isin(["", "-", "—", "nan"])
         df_advisor_data = df_f[~mask_sub & ~mask_bad].copy()
 
-        # ✅ 关键：统一门店名称格式，减少 merge/groupby 错配
-        if "门店名称" in df_store_data.columns:
-            df_store_data["门店名称"] = df_store_data["门店名称"].astype(str).str.strip()
-        if "门店名称" in df_advisor_data.columns:
-            df_advisor_data["门店名称"] = df_advisor_data["门店名称"].astype(str).str.strip()
+        # ✅ 修复点：如果漏斗表没有“小计/合计/总计”行，df_store_data 会为空 -> 门店视图所有指标（含 AMS）都会显示 0
+        # 仅在 df_store_data 为空时，用明细聚合生成门店汇总（不改你原口径，只是补齐门店层数据来源）
+        if df_store_data.empty and ("门店名称" in df_advisor_data.columns):
+            tmp_store = df_advisor_data.copy()
+            tmp_store["线索量"] = pd.to_numeric(tmp_store.get("线索量", 0), errors="coerce").fillna(0)
+            tmp_store["到店量"] = pd.to_numeric(tmp_store.get("到店量", 0), errors="coerce").fillna(0)
+            df_store_data = tmp_store.groupby("门店名称", as_index=False)[["线索量", "到店量"]].sum()
+            df_store_data["邀约专员/管家"] = "合计"
 
         for df in [df_store_data, df_advisor_data]:
             df["线索量"] = pd.to_numeric(df.get("线索量", 0), errors="coerce").fillna(0)
@@ -360,6 +345,10 @@ def process_data(path_f, path_d, path_a, path_s):
                 df["线索到店率_数值"] = safe_div(df, "到店量", "线索量")
 
             df["线索到店率"] = (df["线索到店率_数值"] * 100).map("{:.1f}%".format)
+
+        # ✅ 防止和门店排名表的质检列重名导致 merge 生成 _x/_y：
+        store_qc_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
+        df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
 
         # ================= B. DCC (顾问质检) =================
         df_d = raw_d.rename(
@@ -377,7 +366,10 @@ def process_data(path_f, path_d, path_a, path_s):
         df_d.columns = dedupe_columns(df_d.columns)
 
         wechat_cols = [c for c in df_d.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
-        df_d["S_Wechat"] = _to_1d_numeric(df_d[wechat_cols]) if wechat_cols else 0
+        if wechat_cols:
+            df_d["S_Wechat"] = _to_1d_numeric(df_d[wechat_cols])
+        else:
+            df_d["S_Wechat"] = 0
 
         score_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         for c in score_cols:
@@ -400,7 +392,10 @@ def process_data(path_f, path_d, path_a, path_s):
         store_name_candidates = [c for c in raw_s.columns if ("门店" in str(c)) and ("ID" not in str(c)) and ("编号" not in str(c))]
         if store_name_candidates:
             tmp = raw_s[store_name_candidates]
-            store_name = tmp.bfill(axis=1).iloc[:, 0].astype(str) if isinstance(tmp, pd.DataFrame) else tmp.astype(str)
+            if isinstance(tmp, pd.Series):
+                store_name = tmp.astype(str)
+            else:
+                store_name = tmp.bfill(axis=1).iloc[:, 0].astype(str)
             store_name = store_name.str.strip()
         else:
             store_name = pd.Series(["" for _ in range(len(raw_s))])
@@ -427,6 +422,7 @@ def process_data(path_f, path_d, path_a, path_s):
         df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
 
         # ================= D. AMS (跟进数据) =================
+        # ✅ 这里按你“正确版本”的逻辑保留（列关键词匹配 + 排除“未接通误命中” + 数值压平）
         cols_config = [
             (["管家姓名", "顾问姓名", "顾问名称", "管家"], "邀约专员/管家", []),
             (["DCC平均通话时长", "平均通话时长"], "通话时长", []),
@@ -456,7 +452,16 @@ def process_data(path_f, path_d, path_a, path_s):
         rename_map = {src: tgt for tgt, src in target_to_src.items()}
         df_a = raw_a.rename(columns=rename_map)
 
-        all_ams_calc_cols = ["conn_num", "conn_denom", "timely_num", "timely_denom", "call2_num", "call2_denom", "call3_num", "call3_denom"]
+        all_ams_calc_cols = [
+            "conn_num",
+            "conn_denom",
+            "timely_num",
+            "timely_denom",
+            "call2_num",
+            "call2_denom",
+            "call3_num",
+            "call3_denom",
+        ]
 
         if "邀约专员/管家" not in df_a.columns:
             df_a["邀约专员/管家"] = ""
@@ -470,24 +475,16 @@ def process_data(path_f, path_d, path_a, path_s):
             df_a["通话时长"] = 0
         df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
 
-        # ✅ AMS 自检（命中列）
-        try:
-            st.session_state["_ams_debug"] = {"ams_cols_count": int(len(raw_a.columns)), "ams_hit_map": {tgt: str(src) for tgt, src in target_to_src.items()}}
-        except Exception:
-            pass
-
-        # ✅ AMS 求和自检（转换后）
-        try:
-            st.session_state["_ams_sum_debug"] = {c: float(pd.to_numeric(df_a[c], errors="coerce").fillna(0).sum()) for c in all_ams_calc_cols}
-        except Exception:
-            pass
-
+        # 个人层面的率计算
         df_a["外呼接通率"] = safe_div(df_a, "conn_num", "conn_denom")
         df_a["DCC及时处理率"] = safe_div(df_a, "timely_num", "timely_denom")
         df_a["DCC二次外呼率"] = safe_div(df_a, "call2_num", "call2_denom")
         df_a["DCC三次外呼率"] = safe_div(df_a, "call3_num", "call3_denom")
 
-        final_ams_cols = ["邀约专员/管家", "通话时长", "外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"] + all_ams_calc_cols
+        final_ams_cols = (
+            ["邀约专员/管家", "通话时长", "外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"]
+            + all_ams_calc_cols
+        )
         final_ams_cols = [c for c in final_ams_cols if c in df_a.columns]
         df_a = df_a[final_ams_cols]
 
@@ -506,34 +503,30 @@ def process_data(path_f, path_d, path_a, path_s):
         full_advisors = pd.merge(df_advisor_data, df_d, on="邀约专员/管家", how="left")
         full_advisors = pd.merge(full_advisors, df_a, on="邀约专员/管家", how="left")
 
-        # ✅ 关键：把 AMS 列 NaN 统一为 0（否则 sum 会变 0）
         cols_to_fill_zero = ["线索量", "到店量", "通话时长"] + all_ams_calc_cols
         for c in cols_to_fill_zero:
             if c in full_advisors.columns:
                 full_advisors[c] = pd.to_numeric(full_advisors[c], errors="coerce").fillna(0)
 
         # 2) 门店全量表：从顾问加总 AMS
+        ams_agg_dict = {c: "sum" for c in all_ams_calc_cols}
         if "门店名称" in full_advisors.columns and all(c in full_advisors.columns for c in all_ams_calc_cols):
-            store_ams = full_advisors.groupby("门店名称")[all_ams_calc_cols].sum().reset_index()
+            store_ams = full_advisors.groupby("门店名称").agg(ams_agg_dict).reset_index()
         else:
             store_ams = pd.DataFrame(columns=["门店名称"] + all_ams_calc_cols)
 
+        # 门店级率
         if not store_ams.empty:
             store_ams["外呼接通率"] = safe_div(store_ams, "conn_num", "conn_denom")
             store_ams["DCC及时处理率"] = safe_div(store_ams, "timely_num", "timely_denom")
             store_ams["DCC二次外呼率"] = safe_div(store_ams, "call2_num", "call2_denom")
             store_ams["DCC三次外呼率"] = safe_div(store_ams, "call3_num", "call3_denom")
 
-        # 门店层：漏斗(小计) + 门店排名表质检分 + 门店AMS加总
+        # 门店层：漏斗(小计/聚合) + 门店排名表质检分 + 门店AMS加总
         full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
         full_stores = pd.merge(full_stores, store_ams, on="门店名称", how="left")
 
-        # ✅ 门店 AMS 列也统一 NaN -> 0
-        for c in all_ams_calc_cols:
-            if c in full_stores.columns:
-                full_stores[c] = pd.to_numeric(full_stores[c], errors="coerce").fillna(0)
-
-        # 从 SR_ 字段回填标准字段（门店质检只认排名表）
+        # 从 SR_ 字段回填标准字段（保证门店图表读取到的是门店排名表的原值）
         full_stores["质检总分"] = full_stores.get("SR_质检总分")
         full_stores["S_60s"] = full_stores.get("SR_S_60s")
         full_stores["S_Needs"] = full_stores.get("SR_S_Needs")
@@ -542,7 +535,10 @@ def process_data(path_f, path_d, path_a, path_s):
         full_stores["S_Wechat"] = full_stores.get("SR_S_Wechat")
         full_stores["S_Time"] = full_stores.get("SR_S_Time")
 
+        # 清理 SR_ 临时列
         full_stores.drop(columns=[c for c in full_stores.columns if str(c).startswith("SR_")], inplace=True, errors="ignore")
+
+        # 再兜底一次：确保列名唯一
         full_stores.columns = dedupe_columns(full_stores.columns)
 
         return full_advisors, full_stores
@@ -554,7 +550,7 @@ def process_data(path_f, path_d, path_a, path_s):
         return None, None
 
 
-# ================= 4. 侧边栏逻辑 =================
+# ================= 4. 侧边栏逻辑（放到函数后，避免 NameError） =================
 with st.sidebar:
     st.header("⚙️ 管理面板")
 
@@ -571,19 +567,23 @@ with st.sidebar:
         pwd = st.text_input("输入管理员密码", type="password")
         if pwd == ADMIN_PASSWORD:
             st.info("🔓 请上传新文件：")
-            new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"], key="up_f")
+            new_f = st.file_uploader("1. 漏斗指标表（必须含 sheet：漏斗指标）", type=["xlsx"], key="up_f")
             new_d = st.file_uploader("2. 顾问质检表", type=["xlsx", "csv"], key="up_d")
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"], key="up_a")
             new_s = st.file_uploader("4. 门店排名表", type=["xlsx", "csv"], key="up_s")
+
+            # ✅ 新增：归属表上传（一次上传后持久化到 data_store）
             new_m = st.file_uploader("5. 代理商名称归属(区域经理/省份/城市/门店)", type=["xlsx"], key="up_m")
 
             if st.button("🚀 确认更新数据"):
+                # 情况1：4个主数据齐全 -> 正常更新 4 表（归属表可选一起更）
                 if new_f and new_d and new_a and new_s:
                     with st.spinner("正在保存数据..."):
                         save_uploaded_file(new_f, PATH_F)
                         save_uploaded_file(new_d, PATH_D)
                         save_uploaded_file(new_a, PATH_A)
 
+                        # 门店排名：按真实后缀保存，避免 xlsx 被误存为 csv 造成乱码
                         if str(new_s.name).lower().endswith(".xlsx"):
                             if os.path.exists(PATH_S_CSV):
                                 try:
@@ -599,9 +599,11 @@ with st.sidebar:
                                     pass
                             save_uploaded_file(new_s, PATH_S_CSV)
 
+                        # ✅ 归属表：可选一起上传
                         if new_m is not None:
                             save_uploaded_file(new_m, PATH_M)
 
+                        # ✅ 写入“最新一次上传数据报时间”
                         try:
                             with open(LAST_UPDATE_FILE, "w", encoding="utf-8") as f:
                                 f.write(datetime.now().isoformat(timespec="seconds"))
@@ -611,11 +613,13 @@ with st.sidebar:
                     st.success("更新完成，正在刷新...")
                     st.rerun()
 
+                # 情况2：只上传了归属表 -> 允许单独更新归属表（不动原4表）
                 elif new_m is not None:
                     with st.spinner("正在保存归属表..."):
                         save_uploaded_file(new_m, PATH_M)
                     st.success("归属表更新完成，正在刷新...")
                     st.rerun()
+
                 else:
                     st.error("请传齐 4 个文件（或至少单独上传第5个归属表）")
 
@@ -646,38 +650,31 @@ if has_data:
                 unsafe_allow_html=True,
             )
 
+        # ✅ 仅用于展示的口径徽标（不影响计算）
         filter_badge = "全体"
 
         with col_filter:
+            # 取当前数据里存在的门店（用于交集，避免归属表里出现“数据不存在”的门店）
             if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                 all_stores = sorted(list(df_stores["门店名称"].dropna().astype(str).str.strip().unique()))
             else:
                 all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique()))
 
-            # ✅ 自检行：归属表
+            # ✅ 自检行1：归属表是否加载
             map_path = _resolve_store_map_path()
             map_exists = bool(map_path and os.path.exists(map_path))
             map_mtime = datetime.fromtimestamp(os.path.getmtime(map_path)).strftime("%Y-%m-%d %H:%M:%S") if map_exists else "—"
             st.caption(f"🧭 归属表自检：{'✅已检测到' if map_exists else '❌未检测到'} ｜ 路径：{map_path or '无'} ｜ 修改时间：{map_mtime}")
 
-            # ✅ AMS 自检（命中列）
-            dbg = st.session_state.get("_ams_debug", None)
-            if dbg:
-                st.caption(f"📌 AMS自检：列数={dbg.get('ams_cols_count')} ｜ 命中={dbg.get('ams_hit_map')}")
-
-            # ✅ AMS 自检（转换后求和）
-            sum_dbg = st.session_state.get("_ams_sum_debug", None)
-            if sum_dbg:
-                st.caption(f"📌 AMS求和自检（转换后）: {sum_dbg}")
-
             store_map = get_store_map_df()
-            allowed_stores = all_stores[:]
+            allowed_stores = all_stores[:]  # 默认不过滤（等同全体）
 
             if store_map is None:
                 st.warning("未加载门店归属表（第5项）或列名不匹配（需：区域经理/省份/城市/门店名称）。将回退到【门店下拉】模式。")
                 store_options = ["全部"] + all_stores
                 selected_store = st.selectbox("🏭 切换门店视图", store_options)
             else:
+                # ✅ 新：层级联动（区域经理 -> 省份 -> 城市 -> 门店名称）
                 mgr_opts = ["全体"] + sorted(store_map["区域经理"].dropna().astype(str).str.strip().unique().tolist())
                 sel_mgr = st.selectbox("区域经理", mgr_opts, key="sel_mgr")
 
@@ -708,11 +705,6 @@ if has_data:
 
                 allowed_stores = sorted([s for s in mm["门店名称"].dropna().astype(str).str.strip().unique().tolist() if s in set(all_stores)])
 
-                # ✅ 关键兜底：如果交集为空，直接回退为不过滤（否则所有 KPI 都会变 0）
-                if len(allowed_stores) == 0:
-                    st.warning("⚠️ 当前归属筛选与报表门店名称无交集（门店名可能不一致）。已自动回退为【不过滤】以避免 KPI 全为 0。")
-                    allowed_stores = all_stores[:]
-
                 parts = []
                 if sel_mgr != "全体":
                     parts.append(sel_mgr)
@@ -723,16 +715,26 @@ if has_data:
                 if sel_store != "全体":
                     parts.append(sel_store)
                 filter_badge = " / ".join(parts) if parts else "全体"
-                st.caption(f"当前筛选：{filter_badge} ｜ 允许门店数：{len(allowed_stores)}")
+                st.caption(f"当前筛选：{filter_badge}")
 
+                # ✅ 四级筛选默认仍是门店范围口径
                 selected_store = "全部" if sel_store == "全体" else sel_store
 
-            # 应用门店约束到数据（不改变计算逻辑，只做展示过滤）
+            # 应用门店范围过滤（只过滤门店范围，不改字段/结构）
             if allowed_stores is not None:
                 if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
                     df_stores = df_stores[df_stores["门店名称"].astype(str).str.strip().isin(allowed_stores)].copy()
                 if df_advisors is not None and not df_advisors.empty and "门店名称" in df_advisors.columns:
                     df_advisors = df_advisors[df_advisors["门店名称"].astype(str).str.strip().isin(allowed_stores)].copy()
+
+            # ✅ 自检行2：AMS 汇总（转换后）——不影响功能，仅用于你排查“为什么页面显示0”
+            ams_cols = ["conn_num", "conn_denom", "timely_num", "timely_denom", "call2_num", "call2_denom", "call3_num", "call3_denom"]
+            ams_sums = {}
+            for c in ams_cols:
+                if df_advisors is not None and c in df_advisors.columns:
+                    ams_sums[c] = float(pd.to_numeric(df_advisors[c], errors="coerce").fillna(0).sum())
+            if ams_sums:
+                st.caption(f"🧪 AMS求和自检（转换后）: {ams_sums}")
 
         if selected_store == "全部":
             current_df = df_stores.copy() if df_stores is not None else pd.DataFrame()
@@ -764,12 +766,10 @@ if has_data:
         st.subheader("2️⃣ DCC 外呼过程监控 (Process)")
 
         def calc_kpi_rate(df, num, denom):
-            num_col = _pick_col_like(df, num)
-            denom_col = _pick_col_like(df, denom)
-            if not num_col or not denom_col:
+            if num not in df.columns or denom not in df.columns:
                 return 0
-            total_num = pd.to_numeric(df[num_col], errors="coerce").fillna(0).sum()
-            total_denom = pd.to_numeric(df[denom_col], errors="coerce").fillna(0).sum()
+            total_num = pd.to_numeric(df[num], errors="coerce").fillna(0).sum()
+            total_denom = pd.to_numeric(df[denom], errors="coerce").fillna(0).sum()
             return total_num / total_denom if total_denom > 0 else 0
 
         p1, p2, p3, p4 = st.columns(4)
@@ -777,32 +777,6 @@ if has_data:
         avg_timely = calc_kpi_rate(current_df, "timely_num", "timely_denom")
         avg_call2 = calc_kpi_rate(current_df, "call2_num", "call2_denom")
         avg_call3 = calc_kpi_rate(current_df, "call3_num", "call3_denom")
-
-        # ✅ 当前视图 AMS 自检行（不影响功能：只显示）
-        try:
-            _cn = _pick_col_like(current_df, "conn_num")
-            _cd = _pick_col_like(current_df, "conn_denom")
-            _tn = _pick_col_like(current_df, "timely_num")
-            _td = _pick_col_like(current_df, "timely_denom")
-            _c2n = _pick_col_like(current_df, "call2_num")
-            _c2d = _pick_col_like(current_df, "call2_denom")
-            _c3n = _pick_col_like(current_df, "call3_num")
-            _c3d = _pick_col_like(current_df, "call3_denom")
-
-            def _sum(col):
-                if not col:
-                    return None
-                return float(pd.to_numeric(current_df[col], errors="coerce").fillna(0).sum())
-
-            st.caption(
-                "📌 当前视图AMS求和："
-                f"conn={_sum(_cn)}/{_sum(_cd)} ｜ "
-                f"timely={_sum(_tn)}/{_sum(_td)} ｜ "
-                f"call2={_sum(_c2n)}/{_sum(_c2d)} ｜ "
-                f"call3={_sum(_c3n)}/{_sum(_c3d)}"
-            )
-        except Exception:
-            pass
 
         p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
         p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
@@ -835,7 +809,8 @@ if has_data:
                     height=350,
                 )
                 fig_p1.add_vline(x=avg_conn, line_dash="dash", line_color="gray")
-                fig_p1.add_hline(y=pd.to_numeric(plot_df_vis["S_60s"], errors="coerce").fillna(0).mean(), line_dash="dash", line_color="gray")
+                if "S_60s" in plot_df_vis.columns:
+                    fig_p1.add_hline(y=pd.to_numeric(plot_df_vis["S_60s"], errors="coerce").fillna(0).mean(), line_dash="dash", line_color="gray")
                 fig_p1.update_layout(xaxis=dict(tickformat=".0%"))
                 st.plotly_chart(fig_p1, use_container_width=True)
             else:
@@ -848,8 +823,10 @@ if has_data:
             x_axis_choice = st.radio("选择横轴指标：", ["DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"], horizontal=True)
             plot_df_corr = plot_df_vis.copy()
 
+            # Y：线索到店率（小数）
             plot_df_corr["线索到店率_显示"] = pd.to_numeric(plot_df_corr.get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
 
+            # X：过程指标（小数）
             if x_axis_choice in plot_df_corr.columns:
                 plot_df_corr[x_axis_choice] = pd.to_numeric(plot_df_corr[x_axis_choice], errors="coerce").fillna(0).clip(0, 1)
 
@@ -864,10 +841,52 @@ if has_data:
                     color_continuous_scale="Blues",
                     height=300,
                 )
+
                 fig_p2.update_xaxes(range=[0, 1.02], tickformat=".0%", tick0=0, dtick=0.2)
                 fig_p2.update_yaxes(tickformat=".1%")
                 fig_p2.update_traces(cliponaxis=False)
                 fig_p2.update_layout(margin=dict(r=70))
+
+                if "线索量" in plot_df_corr.columns:
+                    fig_p2.update_traces(
+                        customdata=np.stack(
+                            (
+                                pd.to_numeric(plot_df_corr["线索量"], errors="coerce").fillna(0),
+                                plot_df_corr[x_axis_choice],
+                                plot_df_corr["线索到店率_显示"],
+                                pd.to_numeric(plot_df_corr["质检总分_显示"], errors="coerce").fillna(0),
+                            ),
+                            axis=-1,
+                        ),
+                        cliponaxis=False,
+                        hovertemplate=(
+                            "<b>%{hovertext}</b><br><br>"
+                            "线索量: %{customdata[0]:,.0f}<br>"
+                            + f"{x_axis_choice}: %{{customdata[1]:.1%}}<br>"
+                            "线索到店率: %{customdata[2]:.1%}<br>"
+                            "质检总分: %{customdata[3]:.1f}<br>"
+                            "<extra></extra>"
+                        ),
+                    )
+                else:
+                    fig_p2.update_traces(
+                        customdata=np.stack(
+                            (
+                                plot_df_corr[x_axis_choice],
+                                plot_df_corr["线索到店率_显示"],
+                                pd.to_numeric(plot_df_corr["质检总分_显示"], errors="coerce").fillna(0),
+                            ),
+                            axis=-1,
+                        ),
+                        hovertemplate=(
+                            "<b>%{hovertext}</b><br><br>"
+                            + f"{x_axis_choice}: %{{customdata[0]:.1%}}<br>"
+                            "线索到店率: %{customdata[1]:.1%}<br>"
+                            "质检总分: %{customdata[2]:.1f}<br>"
+                            "<extra></extra>"
+                        ),
+                    )
+
                 st.plotly_chart(fig_p2, use_container_width=True)
             else:
                 st.warning("当前视图缺少所选过程指标列，无法绘图")
@@ -880,7 +899,11 @@ if has_data:
             st.markdown(f"### 🏆 {rank_title}")
             if all(c in current_df.columns for c in ["名称", "线索到店率", "线索到店率_数值"]):
                 rank_df = current_df[["名称", "线索到店率", "线索到店率_数值"]].copy()
-                rank_df["质检总分"] = current_df["质检总分"] if "质检总分" in current_df.columns else 0
+                if "质检总分" in current_df.columns:
+                    rank_df["质检总分"] = current_df["质检总分"]
+                else:
+                    rank_df["质检总分"] = 0
+
                 rank_df["Sort_Score"] = pd.to_numeric(rank_df["线索到店率_数值"], errors="coerce").fillna(-1)
                 rank_df = rank_df.sort_values("Sort_Score", ascending=False).head(15)
                 display_df = rank_df[["名称", "线索到店率", "质检总分"]]
@@ -946,7 +969,7 @@ if has_data:
         with st.container():
             st.markdown("### 🕵️‍♀️ 邀约专员/管家深度诊断")
             if selected_store == "全部":
-                st.info("💡 请先选择具体【门店】，查看该门店下的顾问详细诊断。")
+                st.info("💡 请先选择具体【门店名称】（四级联动中选到具体门店），查看该门店下的顾问详细诊断。")
             else:
                 diag_df = current_df.copy()
                 if "线索量" in diag_df.columns:
@@ -1051,4 +1074,4 @@ if has_data:
                     st.warning("该门店下暂无数据。")
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
-    st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传所有 **4** 个数据文件。")
+    st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传所有 **4** 个数据文件（归属表第5项可选）。")
