@@ -294,12 +294,22 @@ def process_data(path_f, path_d, path_a, path_s):
             }
         )
 
-        # 门店名称列名可能有空格/别名
-        s_store_col = _pick_any_col(df_s, ["门店"]) or "门店名称"
-        if s_store_col != "门店名称" and s_store_col in df_s.columns:
-            df_s.rename(columns={s_store_col: "门店名称"}, inplace=True)
-        if "门店名称" not in df_s.columns:
+        # 门店名称：可能同时存在“门店名称 / 门店名称__1 / 门店”等多列，先合并成唯一的“门店名称”
+        store_name_cols = [c for c in df_s.columns if ("门店" in str(c)) and ("ID" not in str(c))]
+        if not store_name_cols:
             df_s["门店名称"] = ""
+        else:
+            tmp = df_s[store_name_cols]
+            if isinstance(tmp, pd.Series):
+                df_s["门店名称"] = tmp.astype(str).str.strip()
+            else:
+                df_s["门店名称"] = tmp.bfill(axis=1).iloc[:, 0].astype(str).str.strip()
+            # 删除多余门店列（保留门店名称）
+            drop_cols = [c for c in store_name_cols if c != "门店名称"]
+            df_s.drop(columns=drop_cols, inplace=True, errors="ignore")
+
+        # 再次确保列名唯一（避免 merge 报 The column label '门店名称' is not unique）
+        df_s.columns = dedupe_columns(df_s.columns)
 
         s_wechat_cols = [c for c in df_s.columns if ("微信" in str(c) and "添加" in str(c)) or ("添加微信" in str(c))]
         if s_wechat_cols:
