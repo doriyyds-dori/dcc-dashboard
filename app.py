@@ -175,10 +175,11 @@ def clean_percent_col(df:  pd.DataFrame, col_name: str):
 
 def safe_div(df:  pd.DataFrame, num_col: str, denom_col: str):
     if num_col not in df.columns or denom_col not in df.columns:
-        return 0
+        return pd.Series([0] * len(df))  # 改为返回 Series
     num = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
     denom = pd.to_numeric(df[denom_col], errors="coerce").fillna(0)
-    return (num / denom).replace([np.inf, -np.inf], 0).fillna(0)
+    result = (num / denom).replace([np.inf, -np. inf], 0).fillna(0)
+    return result
 
 
 def _to_1d_numeric(x):
