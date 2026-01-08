@@ -56,14 +56,14 @@ def get_store_rank_path():
 LAST_UPDATE_FILE = os.path.join(DATA_DIR, "_last_upload_time.txt")
 
 
-def get_data_update_time(store_rank_path:  str | None):
+def get_data_update_time(store_rank_path: str | None):
     """返回最新一次上传数据报的时间"""
     if os.path.exists(LAST_UPDATE_FILE):
         try:
             txt = open(LAST_UPDATE_FILE, "r", encoding="utf-8").read().strip()
             if txt:
                 return datetime.fromisoformat(txt)
-        except Exception: 
+        except Exception:
             pass
 
     paths = [PATH_F, PATH_D, PATH_A]
@@ -92,7 +92,7 @@ def dedupe_columns(columns):
     out = []
     for c in list(columns):
         c = str(c)
-        if c not in seen: 
+        if c not in seen:  
             seen[c] = 0
             out.append(c)
         else:
@@ -113,15 +113,15 @@ def smart_read(file_path:  str, is_rank_file: bool = False):
             sig = f.read(4)
         if sig == b"PK":
             df = pd. read_excel(file_path, header=None)
-    except Exception: 
+    except Exception:  
         pass
 
-    if df is None: 
+    if df is None:
         is_csv = str(file_path).lower().endswith((". csv", ".txt"))
         if is_csv:
             encodings = ["utf-8-sig", "gb18030", "utf-16"]
-            for enc in encodings:
-                try: 
+            for enc in encodings:  
+                try:
                     df = pd.read_csv(file_path, header=None, encoding=enc, engine="python", on_bad_lines="skip")
                     break
                 except (UnicodeDecodeError, pd.errors.ParserError):
@@ -129,9 +129,9 @@ def smart_read(file_path:  str, is_rank_file: bool = False):
                 except Exception:
                     continue
         else:
-            try: 
+            try:  
                 df = pd.read_excel(file_path, header=None)
-            except Exception:
+            except Exception: 
                 return None
 
     if df is None or df.empty:
@@ -170,13 +170,13 @@ def clean_percent_col(df:  pd.DataFrame, col_name: str):
         return
     series = df[col_name]. astype(str).str.strip().str.replace("%", "", regex=False)
     numeric_series = pd.to_numeric(series, errors="coerce").fillna(0)
-    if numeric_series.max() > 1.0:
+    if numeric_series.max() > 1. 0:
         df[col_name] = numeric_series / 100
-    else:
+    else: 
         df[col_name] = numeric_series
 
 
-def safe_div(df:  pd.DataFrame, num_col: str, denom_col: str):
+def safe_div(df: pd.DataFrame, num_col: str, denom_col: str):
     if num_col not in df.columns or denom_col not in df.columns:
         return 0
     num = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
@@ -227,16 +227,16 @@ def process_data(path_f, path_d, path_a, path_s):
         name_col = _pick_any_col(raw_f, ["管家", "顾问", "邀约"]) or raw_f.columns[1]
 
         col_leads = "线上_有效线索数" if "线上_有效线索数" in raw_f.columns else ("线索量" if "线索量" in raw_f.columns else _pick_any_col(raw_f, ["有效线索", "线索数"]))
-        col_visits = "线上_到店数" if "线上_到店数" in raw_f.columns else ("到店量" if "到店量" in raw_f.columns else _pick_any_col(raw_f, ["到店数", "到店量"]))
+        col_visits = "线上_到店数" if "线上_到店数" in raw_f. columns else ("到店量" if "到店量" in raw_f.columns else _pick_any_col(raw_f, ["到店数", "到店量"]))
 
         col_excel_rate = _pick_any_col(raw_f, ["率"], exclude_keywords=["试驾", "成交"])
 
         rename_dict = {store_col: "门店名称", name_col: "邀约专员/管家"}
-        if col_leads: 
+        if col_leads:  
             rename_dict[col_leads] = "线索量"
-        if col_visits: 
+        if col_visits:  
             rename_dict[col_visits] = "到店量"
-        if col_excel_rate:
+        if col_excel_rate: 
             rename_dict[col_excel_rate] = "Excel_Rate"
 
         df_f = raw_f.rename(columns=rename_dict)
@@ -268,7 +268,7 @@ def process_data(path_f, path_d, path_a, path_s):
             columns={
                 "顾问名称": "邀约专员/管家",
                 "管家": "邀约专员/管家",
-                "质检总分": "质检总分",
+                "质检总分":  "质检总分",
                 "60秒通话": "S_60s",
                 "用车需求": "S_Needs",
                 "车型信息": "S_Car",
@@ -361,7 +361,7 @@ def process_data(path_f, path_d, path_a, path_s):
 
         df_s["门店名称"] = df_s["门店名称"].astype(str).str.strip()
         df_s = df_s[df_s["门店名称"]. ne("")]. copy()
-        df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
+        df_s = df_s. drop_duplicates(subset=["门店名称"], keep="first")
 
         # ================= D. AMS (跟进数据) =================
         rename_map_ams = {
@@ -426,7 +426,7 @@ def process_data(path_f, path_d, path_a, path_s):
             df_a["DCC三次外呼率"] = safe_div(df_a, "call3_num", "call3_denom")
 
         for rate_col in ["外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"]:
-            if rate_col in df_a.columns:
+            if rate_col in df_a. columns:
                 df_a[rate_col] = pd.to_numeric(df_a[rate_col], errors="coerce").fillna(0)
                 mask = df_a[rate_col] > 1
                 if mask.any():
@@ -507,7 +507,7 @@ with st.sidebar:
     has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(PATH_A) and (store_rank_path is not None)
 
     if has_data:
-        st.success("✅ 数据状态：已就绪")
+        st.success("✅ 数据状态：已就��")
     else:
         st.warning("⚠️ 暂无数据")
     st.markdown("---")
@@ -515,7 +515,7 @@ with st.sidebar:
     with st.expander("🔐 更新数据 (仅限管理员)"):
         pwd = st.text_input("输入管理员密码", type="password")
         if pwd == ADMIN_PASSWORD:
-            st.info("🔓 请上传新文件：")
+            st. info("🔓 请上传新文件：")
             new_f = st.file_uploader("1. 漏斗指标表", type=["xlsx", "csv"], key="up_f")
             new_d = st.file_uploader("2. 顾问质检表", type=["xlsx", "csv"], key="up_d")
             new_a = st.file_uploader("3. AMS跟进表", type=["xlsx", "csv"], key="up_a")
@@ -532,12 +532,12 @@ with st.sidebar:
                             if os.path.exists(PATH_S_CSV):
                                 try:
                                     os.remove(PATH_S_CSV)
-                                except Exception: 
+                                except Exception:  
                                     pass
                             save_uploaded_file(new_s, PATH_S_XLSX)
                         else:
                             if os.path.exists(PATH_S_XLSX):
-                                try: 
+                                try:  
                                     os.remove(PATH_S_XLSX)
                                 except Exception:
                                     pass
@@ -552,7 +552,7 @@ with st.sidebar:
                     st.success("更新完成，正在刷新...")
                     st.rerun()
                 else:
-                    st.error("请传齐 4 个文件")
+                    st. error("请传齐 4 个文件")
 
 
 # ================= 5. 界面渲染 =================
@@ -562,9 +562,9 @@ has_data = os.path.exists(PATH_F) and os.path.exists(PATH_D) and os.path.exists(
 if has_data:
     df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A, store_rank_path)
 
-    if df_advisors is not None: 
-        col_header, col_update, col_filter = st.columns([2. 4, 1. 2, 1])
-        with col_header: 
+    if df_advisors is not None:  
+        col_header, col_update, col_filter = st.columns([2. 4, 1.2, 1])
+        with col_header:  
             st.title("Audi | DCC 效能看板")
 
         with col_update:
@@ -573,7 +573,7 @@ if has_data:
             st.markdown(
                 f"""
                 <div style='text-align: right; padding-top: 12px;'>
-                  <span style='display:inline-block; padding: 6px 10px; border-radius:999px; border:1px solid rgba(49, 51, 63, 0.18); background:  rgba(49, 51, 63, 0.06); font-size:  12px;'>
+                  <span style='display: inline-block; padding: 6px 10px; border-radius: 999px; border: 1px solid rgba(49, 51, 63, 0.18); background:  rgba(49, 51, 63, 0.06); font-size: 12px;'>
                     🕒 数据更新时间：<b>{upd_text}</b>
                   </span>
                 </div>
@@ -633,14 +633,14 @@ if has_data:
 
         p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
         p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
-        p3.metric("🔄 二次外呼率", f"{avg_call2:. 1%}")
+        p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
         p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         st.caption("注：以上为加权平均值（sum/sum）")
 
         # 绘图数据准备
         plot_df_vis = current_df.copy()
         if "质检总分" in plot_df_vis.columns:
-            plot_df_vis["质检总分_显示"] = plot_df_vis["质检总分"].fillna(0)
+            plot_df_vis["质检总分_显示"] = plot_df_vis["质检总分"]. fillna(0)
         else:
             plot_df_vis["质检总分_显示"] = 0
 
@@ -679,7 +679,7 @@ if has_data:
             plot_df_corr["线索到店率_显示"] = pd.to_numeric(plot_df_corr. get("线索到店率_数值", 0), errors="coerce").fillna(0).clip(0, 1)
 
             if x_axis_choice in plot_df_corr.columns:
-                plot_df_corr[x_axis_choice] = pd.to_numeric(plot_df_corr[x_axis_choice], errors="coerce").fillna(0).clip(0, 1)
+                plot_df_corr[x_axis_choice] = pd. to_numeric(plot_df_corr[x_axis_choice], errors="coerce").fillna(0).clip(0, 1)
 
                 fig_p2 = px. scatter(
                     plot_df_corr,
@@ -774,7 +774,7 @@ if has_data:
             else:
                 st.warning("当前视图缺少排行必需列")
 
-        with c_right: 
+        with c_right:  
             st.markdown("### 💡 话术质量 vs 转化结果")
             if "S_Time" in plot_df_vis.columns:
                 plot_df = plot_df_vis.copy()
@@ -791,14 +791,14 @@ if has_data:
                     height=400,
                 )
 
-                s60 = pd.to_numeric(plot_df.get("S_60s", 0), errors="coerce").fillna(0)
+                s60 = pd.to_numeric(plot_df. get("S_60s", 0), errors="coerce").fillna(0)
                 total = pd.to_numeric(plot_df.get("质检总分", 0), errors="coerce").fillna(0)
                 leads = pd.to_numeric(plot_df.get("线索量", 0), errors="coerce").fillna(0)
                 fig.update_traces(
                     customdata=np.stack((leads, s60, total), axis=-1),
                     hovertemplate=(
                         "<b>%{hovertext}</b><br><br>"
-                        "明确到店时间得分: %{x:. 1f}<br>"
+                        "明确到店时间得分: %{x:.1f}<br>"
                         "线索到店率: %{y:.1f}%<br>"
                         "线索量: %{customdata[0]:,.0f}<br>"
                         "60秒通话占比得分: %{customdata[1]:.1f}<br>"
@@ -857,14 +857,14 @@ if has_data:
                             fig_f.update_layout(showlegend=False, height=180, margin=dict(t=0, b=0, l=0, r=0))
                             st.plotly_chart(fig_f, use_container_width=True)
 
-                            st.metric("线索到店率", p. get("线索到店率", "0.0%"))
+                            st.metric("线索到店率", p.get("线索到店率", "0.0%"))
                             avg_call_dur = float(pd.to_numeric(p.get("通话时长", 0), errors="coerce") or 0)
-                            st.caption(f"平均通话时长: {avg_call_dur:.1f} 秒")
+                            st.caption(f"平均通话时长: {avg_call_dur:. 1f} 秒")
 
                         has_score = ("质检总分" in p. index) and (not pd.isna(p.get("质检总分")))
 
                         with d2:
-                            st. caption("质检得分详情 (QUALITY)")
+                            st.caption("质检得分详情 (QUALITY)")
                             if has_score:
                                 metrics = {
                                     "明确到店时间":  p.get("S_Time", np.nan),
@@ -886,7 +886,7 @@ if has_data:
                         with d3:
                             if has_score:
                                 st.error("🤖 AI 智能诊断建议")
-                                val_60s = 0 if pd.isna(p.get("S_60s", np.nan)) else float(p.get("S_60s"))
+                                val_60s = 0 if pd.isna(p. get("S_60s", np.nan)) else float(p.get("S_60s"))
 
                                 other_kpis = {
                                     "明确到店":  (p.get("S_Time", np.nan), "建议使用二选一法锁定时间。"),
@@ -900,7 +900,7 @@ if has_data:
                                 is_failing = False
 
                                 if val_60s < 60:
-                                    msg = f"开场先抛利益点 + 明确下一步动作。"
+                                    msg = "开场先抛利益点 + 明确下一步动作。"
                                     issues_list.append(f"🟠 **60秒占比 (得分{val_60s:.1f})** {msg}")
                                     is_failing = True
 
@@ -912,7 +912,7 @@ if has_data:
                                         issues_list.append(f"🔴 **{k} (得分{score:.1f})** {advice}")
                                         is_failing = True
 
-                                if is_failing:
+                                if is_failing:  
                                     for item in issues_list:
                                         st.markdown(item)
                                     st.warning("⚠️ 存在明显短板，请重点辅导。")
@@ -920,12 +920,12 @@ if has_data:
                                     all_above_85 = all(score >= 85 for score, _ in cleaned_others.values())
                                     if all_above_85:
                                         st.success("🌟 各项指标表现优秀！")
-                                    else:
-                                        st. info("✅ 各项指标合格，但仍有提升空间。")
+                                    else:  
+                                        st.info("✅ 各项指标合格，但仍有提升空间。")
                             else:
                                 st.info("暂无数据，无法生成诊断建议。")
                 else:
                     st.warning("该门店下暂无数据。")
 else:
-    st.info("👋 欢迎使用 Audi ��能看板！")
+    st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传所有 4 个数据文件。")
