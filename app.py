@@ -167,7 +167,7 @@ def clean_percent_col(df:   pd.DataFrame, col_name: str):
         return
     series = df[col_name].  astype(str).str.strip().str.replace("%", "", regex=False)
     numeric_series = pd.to_numeric(series, errors="coerce").fillna(0)
-    if numeric_series.max() > 1. 0:
+    if numeric_series.max() > 1.0:
         df[col_name] = numeric_series / 100
     else:  
         df[col_name] = numeric_series
