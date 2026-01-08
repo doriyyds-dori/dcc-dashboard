@@ -246,8 +246,15 @@ def process_data(path_f, path_d, path_a, path_s):
         df_advisor_data = df_f[~mask_sub & ~mask_bad].copy()
 
         for df in [df_store_data, df_advisor_data]:
-            df["线索量"] = pd.to_numeric(df. get("线索量", 0), errors="coerce").fillna(0)
-            df["到店量"] = pd.to_numeric(df.get("到店量", 0), errors="coerce").fillna(0)
+            if "线索量" in df.columns:
+                df["线索量"] = pd.to_numeric(df["线索量"], errors="coerce").fillna(0)
+            else:
+                df["线索量"] = 0
+    
+           if "到店量" in df.columns:
+               df["到店量"] = pd.to_numeric(df["到店量"], errors="coerce").fillna(0)
+           else:
+               df["到店量"] = 0
 
             if "Excel_Rate" in df.columns:
                 clean_percent_col(df, "Excel_Rate")
