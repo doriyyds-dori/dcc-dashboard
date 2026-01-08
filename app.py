@@ -217,6 +217,11 @@ def process_data(path_f, path_d, path_a, path_s):
         raw_a = smart_read(path_a)
         raw_s = smart_read(path_s, is_rank_file=True)
 
+        # 调试输出
+        st.write(f"漏斗表列:  {raw_f.columns.tolist() if raw_f is not None else 'None'}")
+        st.write(f"AMS表列: {raw_a.columns.tolist() if raw_a is not None else 'None'}")
+        st.write(f"AMS表前5行: {raw_a.head() if raw_a is not None else 'None'}")
+        
         if raw_f is None or raw_d is None or raw_a is None or raw_s is None:
             return None, None
 
