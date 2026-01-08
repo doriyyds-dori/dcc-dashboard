@@ -630,7 +630,7 @@ if has_data:
         p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
         p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
         p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
-        p4.metric("🔁 三次外呼率", f"{avg_call3:. 1%}")
+        p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         st.caption("注：以上为加权平均值（sum/sum）")
 
         plot_df_vis = current_df.copy()
@@ -792,7 +792,7 @@ if has_data:
                     customdata=np.stack((leads, s60, total), axis=-1),
                     hovertemplate=(
                         "<b>%{hovertext}</b><br><br>"
-                        "明确到店时间得分: %{x:. 1f}<br>"
+                        "明确到店时间得分: %{x:.1f}<br>"
                         "线索到店率:  %{y:.1f}%<br>"
                         "线索量: %{customdata[0]:,.0f}<br>"
                         "60秒通话占比得分: %{customdata[1]:.1f}<br>"
