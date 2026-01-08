@@ -625,7 +625,7 @@ if has_data:
     df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A, store_rank_path)
 
     if df_advisors is not None: 
-        col_header, col_update, col_filter = st.columns([2. 4, 1.2, 1])
+        col_header, col_update, col_filter = st.columns([2.4, 1.2, 1])
         with col_header: 
             st.title("Audi | DCC 效能看板")
 
@@ -995,3 +995,4 @@ if has_data:
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
     st.warning("👉 目前暂无数据。请在左侧侧边栏展开【更新数据】，输入管理员密码并上传所有 **4** 个数据文件。")
+
