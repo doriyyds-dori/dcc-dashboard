@@ -251,10 +251,10 @@ def process_data(path_f, path_d, path_a, path_s):
             else:
                 df["线索量"] = 0
     
-           if "到店量" in df.columns:
-               df["到店量"] = pd.to_numeric(df["到店量"], errors="coerce").fillna(0)
-           else:
-               df["到店量"] = 0
+            if "到店量" in df.columns:
+                df["到店量"] = pd.to_numeric(df["到店量"], errors="coerce").fillna(0)
+            else:
+                df["到店量"] = 0
 
             if "Excel_Rate" in df.columns:
                 clean_percent_col(df, "Excel_Rate")
