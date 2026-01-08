@@ -563,7 +563,7 @@ if has_data:
     df_advisors, df_stores = process_data(PATH_F, PATH_D, PATH_A, store_rank_path)
 
     if df_advisors is not None:  
-        col_header, col_update, col_filter = st.columns([2. 4, 1.2, 1])
+        col_header, col_update, col_filter = st.columns([2.4, 1.2, 1])
         with col_header:  
             st.title("Audi | DCC 效能看板")
 
