@@ -28,7 +28,7 @@ ADMIN_PASSWORD = "AudiSARR3"
 DATA_DIR = "data_store"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Fixed filenames (removed accidental spaces)
+# Fixed filenames
 PATH_F = os.path.join(DATA_DIR, "funnel.xlsx")
 PATH_D = os.path.join(DATA_DIR, "dcc.xlsx")
 PATH_A = os.path.join(DATA_DIR, "ams.xlsx")
@@ -196,7 +196,15 @@ def _to_1d_numeric(x):
     return pd.to_numeric(x, errors="coerce").fillna(0)
 
 
+def _pick_col_exact(df: pd.DataFrame, exact_name: str):
+    """精确查找列名，如果找到则返回，否则返回None"""
+    for c in df.columns:
+        if str(c).strip() == exact_name:
+            return c
+    return None
+
 def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
+    """模糊查找列名"""
     exclude_keywords = exclude_keywords or []
     for c in df.columns:
         s = str(c)
@@ -228,24 +236,27 @@ def process_data(path_f, path_d, path_a, path_s):
         if raw_f is None or raw_d is None or raw_a is None or raw_s is None:
             return None, None
 
-        # --- Process Funnel Data (F) ---
-        store_col = _pick_any_col(raw_f, ["代理商", "门店"]) or raw_f.columns[0]
-        name_col = _pick_any_col(raw_f, ["管家", "顾问", "邀约"]) or raw_f.columns[1]
+        # ==========================================
+        # 1. 处理漏斗数据 (Funnel) - 核心主表
+        # ==========================================
+        # 用户指定：漏斗表中的门店列名为 "代理商"
+        store_col_f = _pick_col_exact(raw_f, "代理商") or _pick_any_col(raw_f, ["门店", "经销商"]) or raw_f.columns[0]
+        name_col_f = _pick_any_col(raw_f, ["管家", "顾问", "邀约"]) or raw_f.columns[1]
 
         col_leads = "线上_有效线索数" if "线上_有效线索数" in raw_f.columns else ("线索量" if "线索量" in raw_f.columns else _pick_any_col(raw_f, ["有效线索", "线索数"]))
         col_visits = "线上_到店数" if "线上_到店数" in raw_f.columns else ("到店量" if "到店量" in raw_f.columns else _pick_any_col(raw_f, ["到店数", "到店量"]))
 
         col_excel_rate = _pick_any_col(raw_f, ["率"], exclude_keywords=["试驾", "成交"])
 
-        rename_dict = {store_col: "门店名称", name_col: "邀约专员/管家"}
+        rename_dict_f = {store_col_f: "门店名称", name_col_f: "邀约专员/管家"}
         if col_leads:
-            rename_dict[col_leads] = "线索量"
+            rename_dict_f[col_leads] = "线索量"
         if col_visits:
-            rename_dict[col_visits] = "到店量"
+            rename_dict_f[col_visits] = "到店量"
         if col_excel_rate:
-            rename_dict[col_excel_rate] = "Excel_Rate"
+            rename_dict_f[col_excel_rate] = "Excel_Rate"
 
-        df_f = raw_f.rename(columns=rename_dict)
+        df_f = raw_f.rename(columns=rename_dict_f)
         df_f.columns = dedupe_columns(df_f.columns)
 
         mask_sub = df_f["邀约专员/管家"].astype(str).str.contains("小计|合计|总计", na=False)
@@ -275,10 +286,14 @@ def process_data(path_f, path_d, path_a, path_s):
 
             df["线索到店率"] = (df["线索到店率_数值"] * 100).map("{:.1f}%".format)
 
+        # 清理多余列
         store_qc_cols = ["质检总分", "S_60s", "S_Needs", "S_Car", "S_Policy", "S_Wechat", "S_Time"]
         df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
 
-        # --- Process DCC Data (D) ---
+        # ==========================================
+        # 2. 处理 DCC 质检数据 (DCC Advisor QC)
+        # ==========================================
+        # DCC表一般按顾问合并，用户提到可能也有"门店名称"列
         df_d = raw_d.rename(
             columns={
                 "顾问名称": "邀约专员/管家",
@@ -291,6 +306,11 @@ def process_data(path_f, path_d, path_a, path_s):
                 "明确到店时间": "S_Time",
             }
         )
+
+        # 尝试寻找门店名称并标准化，以便后续可能的验证，尽管主要合并键是人名
+        store_col_d = _pick_col_exact(raw_d, "门店名称") or _pick_any_col(raw_d, ["门店", "代理商"])
+        if store_col_d and store_col_d in df_d.columns:
+             df_d = df_d.rename(columns={store_col_d: "门店名称"})
 
         df_d.columns = dedupe_columns(df_d.columns)
 
@@ -307,79 +327,64 @@ def process_data(path_f, path_d, path_a, path_s):
         
         if "邀约专员/管家" not in df_d.columns:
             df_d["邀约专员/管家"] = ""
-        df_d = df_d[["邀约专员/管家"] + [c for c in score_cols if c in df_d.columns]]
+        
+        # 保留列：顾问名 + 门店名(如果有) + 分数
+        cols_to_keep_d = ["邀约专员/管家"] + [c for c in score_cols if c in df_d.columns]
+        if "门店名称" in df_d.columns:
+            cols_to_keep_d.append("门店名称")
+            
+        df_d = df_d[cols_to_keep_d]
 
-        # --- Process Store Rank Data (S) ---
-        def pick_col_by_keywords(df: pd.DataFrame, must_have_any, must_have_all=None, exclude=None):
-            must_have_all = must_have_all or []
-            exclude = exclude or []
-            for c in df.columns:
-                s = str(c)
-                if any(k in s for k in must_have_any) and all(k in s for k in must_have_all) and not any(x in s for x in exclude):
-                    return c
-            return None
-
+        # ==========================================
+        # 3. 处理 门店排名/质检数据 (Store Rank QC)
+        # ==========================================
+        # 用户指定：DCC质检数据表（这里指门店级）列名为 "门店名称"
         store_name_candidates = [c for c in raw_s.columns if ("门店" in str(c)) and ("ID" not in str(c)) and ("编号" not in str(c))]
-        if store_name_candidates:
+        # 优先精确匹配 "门店名称"
+        store_name_exact = _pick_col_exact(raw_s, "门店名称")
+        
+        if store_name_exact:
+            store_name = raw_s[store_name_exact].astype(str)
+        elif store_name_candidates:
             tmp = raw_s[store_name_candidates]
             if isinstance(tmp, pd.Series):
                 store_name = tmp.astype(str)
             else:
                 store_name = tmp.bfill(axis=1).iloc[:, 0].astype(str)
-            store_name = store_name.str.strip()
         else:
             store_name = pd.Series(["" for _ in range(len(raw_s))])
+            
+        store_name = store_name.str.strip()
 
-        col_total = pick_col_by_keywords(raw_s, ["质检总分", "总分"], exclude=["显示"])
-        col_60s = pick_col_by_keywords(raw_s, ["60秒", "60 秒"], exclude=[])
-        col_needs = pick_col_by_keywords(raw_s, ["用车需求"], exclude=[])
-        col_car = pick_col_by_keywords(raw_s, ["车型信息"], exclude=[])
-        col_policy = pick_col_by_keywords(raw_s, ["政策"], exclude=[])
-        col_time = pick_col_by_keywords(raw_s, ["明确到店", "到店时间"], exclude=[])
-        col_wechat = pick_col_by_keywords(raw_s, ["添加微信", "加微信", "加微"], exclude=[])
+        col_total = _pick_any_col(raw_s, ["质检总分", "总分"], exclude=["显示"])
+        col_60s = _pick_any_col(raw_s, ["60秒", "60 秒"], exclude=[])
+        col_needs = _pick_any_col(raw_s, ["用车需求"], exclude=[])
+        col_car = _pick_any_col(raw_s, ["车型信息"], exclude=[])
+        col_policy = _pick_any_col(raw_s, ["政策"], exclude=[])
+        col_time = _pick_any_col(raw_s, ["明确到店", "到店时间"], exclude=[])
+        col_wechat = _pick_any_col(raw_s, ["添加微信", "加微信", "加微"], exclude=[])
 
         df_s = pd.DataFrame({"门店名称": store_name})
 
-        if col_total and col_total in raw_s.columns:
-            df_s["SR_质检总分"] = _to_1d_numeric(raw_s[col_total])
-        else:
-            df_s["SR_质检总分"] = np.nan
-
-        if col_60s and col_60s in raw_s.columns:
-            df_s["SR_S_60s"] = _to_1d_numeric(raw_s[col_60s])
-        else:
-            df_s["SR_S_60s"] = np.nan
-
-        if col_needs and col_needs in raw_s.columns:
-            df_s["SR_S_Needs"] = _to_1d_numeric(raw_s[col_needs])
-        else:
-            df_s["SR_S_Needs"] = np.nan
-
-        if col_car and col_car in raw_s.columns:
-            df_s["SR_S_Car"] = _to_1d_numeric(raw_s[col_car])
-        else:
-            df_s["SR_S_Car"] = np.nan
-
-        if col_policy and col_policy in raw_s.columns:
-            df_s["SR_S_Policy"] = _to_1d_numeric(raw_s[col_policy])
-        else:
-            df_s["SR_S_Policy"] = np.nan
-
-        if col_wechat and col_wechat in raw_s.columns:
-            df_s["SR_S_Wechat"] = _to_1d_numeric(raw_s[col_wechat])
-        else:
-            df_s["SR_S_Wechat"] = np.nan
-
-        if col_time and col_time in raw_s.columns:
-            df_s["SR_S_Time"] = _to_1d_numeric(raw_s[col_time])
-        else:
-            df_s["SR_S_Time"] = np.nan
+        # 映射各分项...
+        for col_raw, col_new in [
+            (col_total, "SR_质检总分"), (col_60s, "SR_S_60s"), (col_needs, "SR_S_Needs"),
+            (col_car, "SR_S_Car"), (col_policy, "SR_S_Policy"), (col_wechat, "SR_S_Wechat"), (col_time, "SR_S_Time")
+        ]:
+            if col_raw and col_raw in raw_s.columns:
+                df_s[col_new] = _to_1d_numeric(raw_s[col_raw])
+            else:
+                df_s[col_new] = np.nan
 
         df_s["门店名称"] = df_s["门店名称"].astype(str).str.strip()
         df_s = df_s[df_s["门店名称"].ne("")].copy()
         df_s = df_s.drop_duplicates(subset=["门店名称"], keep="first")
 
-        # --- Process AMS Data (A) ---
+        # ==========================================
+        # 4. 处理 AMS 数据 (AMS)
+        # ==========================================
+        # 用户指定：AMS表中的门店列名为 "代理商"
+        
         rename_map_ams = {
             "管家姓名": "邀约专员/管家",
             "DCC平均通话时长": "通话时长",
@@ -393,14 +398,19 @@ def process_data(path_f, path_d, path_a, path_s):
             "DCC二呼状态为需再呼的线索数": "call3_denom",
         }
 
-        rate_cols_to_keep = ["外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"]
-
         df_a = raw_a.copy()
+        
+        # 优先寻找 "代理商"，找到则重命名为 "门店名称"
+        store_col_a = _pick_col_exact(raw_a, "代理商") or _pick_any_col(raw_a, ["门店", "经销商"])
+        if store_col_a:
+            df_a = df_a.rename(columns={store_col_a: "门店名称"})
 
         for src, tgt in rename_map_ams.items():
             if src in df_a.columns:
                 df_a = df_a.rename(columns={src: tgt})
 
+        # 清洗百分比列
+        rate_cols_to_keep = ["外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"]
         for col in rate_cols_to_keep:
             if col in df_a.columns:
                 df_a[col] = pd.to_numeric(df_a[col].astype(str).str.replace('%', ''), errors="coerce").fillna(0)
@@ -410,19 +420,12 @@ def process_data(path_f, path_d, path_a, path_s):
 
         if "邀约专员/管家" not in df_a.columns:
             df_a["邀约专员/管家"] = ""
-        df_a["邀约专员/管家"] = df_a["邀约专员/管家"].astype(str).str.strip()
-
+        
+        # 填充数值列0
         all_ams_calc_cols = [
-            "conn_num",
-            "conn_denom",
-            "timely_num",
-            "timely_denom",
-            "call2_num",
-            "call2_denom",
-            "call3_num",
-            "call3_denom",
+            "conn_num", "conn_denom", "timely_num", "timely_denom",
+            "call2_num", "call2_denom", "call3_num", "call3_denom"
         ]
-
         for c in all_ams_calc_cols:
             if c not in df_a.columns:
                 df_a[c] = 0
@@ -430,86 +433,91 @@ def process_data(path_f, path_d, path_a, path_s):
 
         if "通话时长" not in df_a.columns:
             df_a["通话时长"] = 0
-        df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])  # Fixed typo here
+        df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
 
-        if "外呼接通率" not in df_a.columns:
-            df_a["外呼接通率"] = safe_div(df_a, "conn_num", "conn_denom")
-        if "DCC及时处理率" not in df_a.columns:
-            df_a["DCC及时处理率"] = safe_div(df_a, "timely_num", "timely_denom")
-        if "DCC二次外呼率" not in df_a.columns:
-            df_a["DCC二次外呼率"] = safe_div(df_a, "call2_num", "call2_denom")
-        if "DCC三次外呼率" not in df_a.columns:
-            df_a["DCC三次外呼率"] = safe_div(df_a, "call3_num", "call3_denom")
+        # ==========================================
+        # 5. 数据清洗与合并 (Merge & Clean)
+        # ==========================================
+        
+        # 全局清洗：去除所有关键列的空格、nan字符串
+        def strict_clean_str(series):
+            return series.astype(str).str.strip().str.replace(r'\s+', '', regex=True).str.lower().replace('nan', '')
 
-        for rate_col in ["外呼接通率", "DCC及时处理率", "DCC二次外呼率", "DCC三次外呼率"]:
-            if rate_col in df_a.columns:
-                df_a[rate_col] = pd.to_numeric(df_a[rate_col], errors="coerce").fillna(0)
-                mask = df_a[rate_col] > 1
-                if mask.any():
-                    df_a.loc[mask, rate_col] = df_a.loc[mask, rate_col] / 100
-                df_a[rate_col] = df_a[rate_col].clip(0, 1)
+        for df_x in [df_store_data, df_advisor_data, df_d, df_a, df_s]:
+            if "门店名称" in df_x.columns:
+                df_x["门店名称"] = strict_clean_str(df_x["门店名称"])
+            if "邀约专员/管家" in df_x.columns:
+                df_x["邀约专员/管家"] = strict_clean_str(df_x["邀约专员/管家"])
 
-        # ✅ 标准化所有邀约专员/管家列和门店名列
-        for df in [df_store_data, df_advisor_data, df_d, df_a, df_s]:
-            if "邀约专员/管家" in df.columns:
-                df["邀约专员/管家"] = df["邀约专员/管家"].astype(str).str.strip().str.lower()
-            if "门店名称" in df.columns:
-                df["门店名称"] = df["门店名称"].astype(str).str.strip()
-
-        # ✅ 改进的合并逻辑：DCC按顾问合并，AMS按门店汇总
+        # ------------------------------------------
+        # 合并 1: 漏斗(Advisor) + DCC(Advisor)
+        # ------------------------------------------
         full_advisors = df_advisor_data.copy()
-
-        # 合并DCC数据（按顾问名）
+        
+        # 合并 DCC (优先用人名匹配)
         if "邀约专员/管家" in df_d.columns:
+            # 如果DCC表也有门店名，可以作为辅助验证，但这里简化为左连接人名
+            # 防止列名冲突，重命名DCC的门店列(如果有)
+            cols_use_d = list(df_d.columns)
+            if "门店名称" in cols_use_d:
+                df_d = df_d.rename(columns={"门店名称": "门店名称_dcc"})
+            
             full_advisors = pd.merge(full_advisors, df_d, on="邀约专员/管家", how="left", suffixes=("", "_dcc"))
 
-        # 按门店汇总AMS数据（因为AMS表中顾问名和漏斗表不一致）
+        # ------------------------------------------
+        # 合并 2: 计算 AMS 门店级汇总数据
+        # ------------------------------------------
+        # 必须确保 AMS 表中有 "门店名称" 且有数据
         if "门店名称" in df_a.columns and len(all_ams_calc_cols) > 0:
             ams_by_store = df_a.groupby("门店名称").agg({
-                "conn_num": "sum",
-                "conn_denom": "sum",
-                "timely_num": "sum",
-                "timely_denom": "sum",
-                "call2_num": "sum",
-                "call2_denom": "sum",
-                "call3_num": "sum",
-                "call3_denom": "sum",
+                "conn_num": "sum", "conn_denom": "sum",
+                "timely_num": "sum", "timely_denom": "sum",
+                "call2_num": "sum", "call2_denom": "sum",
+                "call3_num": "sum", "call3_denom": "sum",
                 "通话时长": "mean"
             }).reset_index()
             
-            # 计算汇总后的比率
+            # 计算门店级率值
             ams_by_store["外呼接通率"] = safe_div(ams_by_store, "conn_num", "conn_denom")
             ams_by_store["DCC及时处理率"] = safe_div(ams_by_store, "timely_num", "timely_denom")
             ams_by_store["DCC二次外呼率"] = safe_div(ams_by_store, "call2_num", "call2_denom")
             ams_by_store["DCC三次外呼率"] = safe_div(ams_by_store, "call3_num", "call3_denom")
             
-            # 和顾问数据按门店合并
+            # 将 AMS 门店级数据合并回 顾问明细表 (按门店匹配)
             full_advisors = pd.merge(full_advisors, ams_by_store, on="门店名称", how="left")
+            
         else:
-            # 如果没有门店名，直接按顾问名合并AMS
-            full_advisors = pd.merge(full_advisors, df_a[["邀约专员/管家"] + [c for c in df_a.columns if c not in ["邀约专员/管家", "门店名称"]]], 
-                                   on="邀约专员/管家", how="left", suffixes=("", "_ams"))
+            # 如果 AMS 没有门店列，尝试直接用人名合并 (Fallback)
+            cols_ams_advisors = ["邀约专员/管家"] + [c for c in df_a.columns if c not in ["邀约专员/管家", "门店名称"]]
+            full_advisors = pd.merge(full_advisors, df_a[cols_ams_advisors], on="邀约专员/管家", how="left", suffixes=("", "_ams"))
 
+        # ------------------------------------------
+        # 合并 3: 生成 门店级 最终宽表 (Full Stores)
+        # ------------------------------------------
+        # 填充 NaN
         cols_to_fill_zero = ["线索量", "到店量", "通话时长"] + all_ams_calc_cols
         for c in cols_to_fill_zero:
             if c in full_advisors.columns:
                 full_advisors[c] = pd.to_numeric(full_advisors[c], errors="coerce").fillna(0)
 
+        # 重新聚合一份确保准确的 store_ams (基于full_advisors聚合，保证漏斗数据和AMS数据维度一致)
         ams_agg_dict = {c: "sum" for c in all_ams_calc_cols}
         if "门店名称" in full_advisors.columns and all(c in full_advisors.columns for c in all_ams_calc_cols):
-            store_ams = full_advisors.groupby("门店名称").agg(ams_agg_dict).reset_index()
+            store_ams_final = full_advisors.groupby("门店名称").agg(ams_agg_dict).reset_index()
         else:
-            store_ams = pd.DataFrame(columns=["门店名称"] + all_ams_calc_cols)
+            store_ams_final = pd.DataFrame(columns=["门店名称"] + all_ams_calc_cols)
 
-        if not store_ams.empty:
-            store_ams["外呼接通率"] = safe_div(store_ams, "conn_num", "conn_denom")
-            store_ams["DCC及时处理率"] = safe_div(store_ams, "timely_num", "timely_denom")
-            store_ams["DCC二次外呼率"] = safe_div(store_ams, "call2_num", "call2_denom")
-            store_ams["DCC三次外呼率"] = safe_div(store_ams, "call3_num", "call3_denom")
+        if not store_ams_final.empty:
+            store_ams_final["外呼接通率"] = safe_div(store_ams_final, "conn_num", "conn_denom")
+            store_ams_final["DCC及时处理率"] = safe_div(store_ams_final, "timely_num", "timely_denom")
+            store_ams_final["DCC二次外呼率"] = safe_div(store_ams_final, "call2_num", "call2_denom")
+            store_ams_final["DCC三次外呼率"] = safe_div(store_ams_final, "call3_num", "call3_denom")
 
+        # 合并: 漏斗门店汇总 + 门店QC排名 + 门店AMS汇总
         full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
-        full_stores = pd.merge(full_stores, store_ams, on="门店名称", how="left")
+        full_stores = pd.merge(full_stores, store_ams_final, on="门店名称", how="left")
 
+        # 整理列名 (将 SR_ 前缀的列转正)
         full_stores["质检总分"] = full_stores.get("SR_质检总分")
         full_stores["S_60s"] = full_stores.get("SR_S_60s")
         full_stores["S_Needs"] = full_stores.get("SR_S_Needs")
@@ -519,7 +527,6 @@ def process_data(path_f, path_d, path_a, path_s):
         full_stores["S_Time"] = full_stores.get("SR_S_Time")
 
         full_stores.drop(columns=[c for c in full_stores.columns if str(c).startswith("SR_")], inplace=True, errors="ignore")
-
         full_stores.columns = dedupe_columns(full_stores.columns)
 
         return full_advisors, full_stores
@@ -613,10 +620,12 @@ if has_data:
             )
 
         with col_filter:
+            # 获取所有非空的门店名称
             if df_stores is not None and not df_stores.empty and "门店名称" in df_stores.columns:
-                all_stores = sorted(list(df_stores["门店名称"].dropna().unique()))
+                all_stores = sorted([s for s in df_stores["门店名称"].dropna().unique() if s.strip()])
             else:
-                all_stores = sorted(list(df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().unique()))
+                all_stores = sorted([s for s in df_advisors.get("门店名称", pd.Series(dtype=str)).dropna().unique() if s.strip()])
+            
             store_options = ["全部"] + all_stores
             selected_store = st.selectbox("🏭 切换门店视图", store_options)
 
