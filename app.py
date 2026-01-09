@@ -11,7 +11,6 @@ from datetime import datetime
 st.set_page_config(page_title="Audi DCC 效能看板", layout="wide", page_icon="🏎️")
 
 # --- CSS Styling ---
-# 调整 selectbox 样式，使其在并排时更美观
 st.markdown(
     """
     <style>
@@ -217,6 +216,12 @@ def _pick_any_col(df: pd.DataFrame, any_keywords, exclude_keywords=None):
 @st.cache_data(ttl=300)
 def process_data(path_f, path_d, path_a, path_s, path_m):
     try:
+        # 定义特定的去括号清洗函数
+        def remove_brackets(series):
+            if series is None: return None
+            # 去除中文括号（***）或英文括号 (***) 及其内部所有文字
+            return series.astype(str).str.replace(r'[（\(].*?[）\)]', '', regex=True)
+
         # 读取业务数据
         raw_f = smart_read(path_f)
         raw_d = smart_read(path_d)
@@ -255,6 +260,8 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
                 df_mapping["城市"] = raw_m[col_city] if col_city else "未知"
                 
                 # 清洗门店名作为 Key
+                # 归属表也建议执行去括号操作，以增加匹配率
+                df_mapping["门店名称"] = remove_brackets(df_mapping["门店名称"])
                 df_mapping["Join_Key"] = strict_clean_str(df_mapping["门店名称"])
                 # 去重，防止一对多
                 df_mapping = df_mapping.drop_duplicates(subset=["Join_Key"])
@@ -278,7 +285,10 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
         df_f.columns = dedupe_columns(df_f.columns)
 
         if "门店名称" in df_f.columns:
+            # 先填充向下 (ffill)
             df_f["门店名称"] = df_f["门店名称"].replace([r'^\s*$', 'nan', 'None'], np.nan, regex=True).ffill()
+            # 【新增】清洗括号
+            df_f["门店名称"] = remove_brackets(df_f["门店名称"])
 
         mask_sub = df_f["邀约专员/管家"].astype(str).str.contains("小计|合计|总计", na=False)
         df_store_data = df_f[mask_sub].copy()
@@ -307,7 +317,7 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
         df_store_data.drop(columns=[c for c in store_qc_cols if c in df_store_data.columns], inplace=True, errors="ignore")
 
         # ==========================================
-        # 2. 处理 DCC 顾问质检数据
+        # 2. 处理 DCC 顾问质检数据 (管家排名)
         # ==========================================
         df_d = raw_d.rename(columns={
             "顾问名称": "邀约专员/管家", "管家": "邀约专员/管家", "质检总分": "质检总分",
@@ -317,6 +327,10 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
         store_col_d = _pick_col_exact(raw_d, "门店名称") or _pick_any_col(raw_d, ["门店", "代理商"])
         if store_col_d and store_col_d in df_d.columns:
              df_d = df_d.rename(columns={store_col_d: "门店名称"})
+        
+        # 【新增】清洗括号
+        if "门店名称" in df_d.columns:
+            df_d["门店名称"] = remove_brackets(df_d["门店名称"])
         
         df_d.columns = dedupe_columns(df_d.columns)
         
@@ -347,6 +361,9 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
         store_name = store_name.str.strip()
         df_s = pd.DataFrame({"门店名称": store_name})
 
+        # 【新增】清洗括号
+        df_s["门店名称"] = remove_brackets(df_s["门店名称"])
+
         # Mapping config
         col_map = {
             "SR_质检总分": _pick_any_col(raw_s, ["质检总分", "总分"], exclude_keywords=["显示"]),
@@ -374,6 +391,10 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
         df_a = raw_a.copy()
         store_col_a = _pick_col_exact(raw_a, "代理商") or _pick_any_col(raw_a, ["门店", "经销商"])
         if store_col_a: df_a = df_a.rename(columns={store_col_a: "门店名称"})
+
+        # 【新增】清洗括号
+        if "门店名称" in df_a.columns:
+            df_a["门店名称"] = remove_brackets(df_a["门店名称"])
 
         rename_map_ams = {
             "管家姓名": "邀约专员/管家", "DCC平均通话时长": "通话时长", "DCC接通线索数": "conn_num",
@@ -763,28 +784,121 @@ if op_data_ready:
                 st.plotly_chart(fig, use_container_width=True)
             else: st.warning("数据不足")
 
-        # 诊断部分保持不变，仅当选了具体门店时才显示顾问列表
+        # 诊断部分
         st.markdown("---")
         if sel_store != "全部":
             st.markdown("### 🕵️‍♀️ 顾问深度诊断")
-            # ... (这部分逻辑复用之前的，无需变动，因为current_df已经是顾问级数据)
-            diag_list = sorted(current_df["邀约专员/管家"].dropna().astype(str).unique())
+            # 使用 current_df (已经是过滤后的顾问数据)
+            diag_df = current_df.copy()
+            if "线索量" in diag_df.columns:
+                 diag_df["线索量"] = pd.to_numeric(diag_df["线索量"], errors="coerce").fillna(0)
+
+            diag_list = sorted(diag_df["邀约专员/管家"].dropna().astype(str).unique())
+            
             if diag_list:
-                sel_p = st.selectbox("🔍 选择顾问：", diag_list)
-                p_row = current_df[current_df["邀约专员/管家"] == sel_p]
+                sel_p = st.selectbox("🔍 选择该店邀约专员/管家：", diag_list)
+                p_row = diag_df[diag_df["邀约专员/管家"] == sel_p]
+                
                 if not p_row.empty:
                     p = p_row.iloc[0]
-                    # 简单绘制一下漏斗
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        fig_f = go.Figure(go.Funnel(y=["线索", "到店"], x=[p.get("线索量",0), p.get("到店量",0)]))
-                        fig_f.update_layout(height=200, showlegend=False)
+
+                    d1, d2, d3 = st.columns([1, 1, 1.2])
+                    
+                    # --- D1: 漏斗 & 基础结果 ---
+                    with d1:
+                        st.caption("转化漏斗 (RESULT)")
+                        leads = float(pd.to_numeric(p.get("线索量", 0), errors="coerce") or 0)
+                        visits = float(pd.to_numeric(p.get("到店量", 0), errors="coerce") or 0)
+                        
+                        fig_f = go.Figure(
+                            go.Funnel(
+                                y=["线索量", "到店量"],
+                                x=[leads, visits],
+                                textinfo="value+percent initial",
+                                marker={"color": ["#d9d9d9", "#bb0a30"]},
+                            )
+                        )
+                        fig_f.update_layout(showlegend=False, height=180, margin=dict(t=0, b=0, l=0, r=0))
                         st.plotly_chart(fig_f, use_container_width=True)
-                    with c2:
-                        st.metric("线索到店率", p.get("线索到店率", "0%"))
-                        st.metric("质检总分", f"{p.get('质检总分', 0):.1f}")
+
+                        st.metric("线索到店率", p.get("线索到店率", "0.0%"))
+                        
+                        avg_call_dur = float(pd.to_numeric(p.get("通话时长", 0), errors="coerce") or 0)
+                        st.caption(f"平均通话时长: {avg_call_dur:.1f} 秒")
+
+                    # --- D2: 质检得分详情 ---
+                    has_score = ("质检总分" in p.index) and (not pd.isna(p.get("质检总分"))) and (p.get("质检总分") != 0)
+                    
+                    with d2:
+                        st.caption("质检得分详情 (QUALITY)")
+                        if has_score:
+                            metrics = {
+                                "明确到店时间": p.get("S_Time", np.nan),
+                                "60秒通话占比": p.get("S_60s", np.nan),
+                                "用车需求": p.get("S_Needs", np.nan),
+                                "车型信息介绍": p.get("S_Car", np.nan),
+                                "政策相关话术": p.get("S_Policy", np.nan),
+                                "添加微信": p.get("S_Wechat", np.nan),
+                            }
+                            
+                            for k, v in metrics.items():
+                                val = 0 if pd.isna(v) else float(v)
+                                c_a, c_b = st.columns([3, 1])
+                                c_a.progress(min(val / 100, 1.0))
+                                c_b.write(f"{val:.0f}")
+                                st.caption(k)
+                        else:
+                            st.warning("暂无质检数据")
+
+                    # --- D3: AI 诊断 ---
+                    with d3:
+                        if has_score:
+                            st.error("🤖 AI 智能诊断建议")
+                            
+                            val_60s = 0 if pd.isna(p.get("S_60s", np.nan)) else float(p.get("S_60s"))
+                            
+                            other_kpis = {
+                                "明确到店": (p.get("S_Time", np.nan), "建议使用二选一法锁定时间。"),
+                                "添加微信": (p.get("S_Wechat", np.nan), "建议以发定位/资料为由加微。"),
+                                "用车需求": (p.get("S_Needs", np.nan), "需加强需求挖掘，至少问清场景/预算/家庭结构。"),
+                                "车型信息": (p.get("S_Car", np.nan), "需提升产品讲解链路，先讲1-2个强卖点。"),
+                                "政策相关": (p.get("S_Policy", np.nan), "需准确传达政策，并用截止时间推动决策。"),
+                            }
+
+                            issues_list = []
+                            is_failing = False
+
+                            # 60s Rule
+                            if val_60s < 60:
+                                msg = "开场先抛利益点 + 明确下一步动作。"
+                                issues_list.append(f"🟠 **60秒占比 (得分{val_60s:.1f})** {msg}")
+                                is_failing = True
+
+                            # Other KPIs Rule
+                            cleaned_others = {}
+                            for k, (v, advice) in other_kpis.items():
+                                score = 0 if pd.isna(v) else float(v)
+                                cleaned_others[k] = (score, advice)
+                                if score < 80:
+                                    issues_list.append(f"🔴 **{k} (得分{score:.1f})** {advice}")
+                                    is_failing = True
+
+                            if is_failing:
+                                for item in issues_list:
+                                    st.markdown(item)
+                                st.warning("⚠️ 存在明显短板，请重点辅导。")
+                            else:
+                                all_above_85 = all(score >= 85 for score, _ in cleaned_others.values())
+                                if all_above_85:
+                                    st.success("🌟 各项指标表现优秀！")
+                                else:
+                                    st.info("✅ 各项指标合格，但仍有提升空间。")
+                        else:
+                            st.info("暂无数据，无法生成诊断建议。")
+            else:
+                st.warning("该门店下暂无数据。")
         else:
-            st.info("💡 选择具体【门店】后，可查看该店顾问的详细诊断报告。")
+             st.info("💡 选择具体【门店】后，可查看该店顾问的详细诊断报告。")
 
 else:
     st.info("👋 欢迎使用 Audi 效能看板！")
