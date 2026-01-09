@@ -11,12 +11,14 @@ from datetime import datetime
 st.set_page_config(page_title="Audi DCC 效能看板", layout="wide", page_icon="🏎️")
 
 # --- CSS Styling ---
+# 调整 selectbox 样式，使其在并排时更美观
 st.markdown(
     """
     <style>
         .top-container {display: flex; align-items: center; justify-content: space-between; padding-bottom: 20px; border-bottom: 2px solid #f0f0f0;}
         .metric-card {background-color: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);}
-        div[data-testid="stSelectbox"] {min-width: 150px;} 
+        /* 调整下拉框样式，防止过宽或过窄 */
+        div[data-testid="stSelectbox"] {width: 100%;} 
         .big-font {font-size: 18px !important; font-weight: bold;}
     </style>
     """,
@@ -532,6 +534,9 @@ with st.sidebar:
                                 with open(LAST_UPDATE_FILE, "w", encoding="utf-8") as f:
                                     f.write(datetime.now().isoformat(timespec="seconds"))
                             except Exception: pass
+                        
+                        # 清除缓存，确保下次读取新数据
+                        process_data.clear()
                         st.success("更新完成，正在刷新...")
                         st.rerun()
                     else:
@@ -544,11 +549,9 @@ with st.sidebar:
                 if st.button("💾 保存归属关系"):
                     if new_m:
                         with st.spinner("正在保存归属表..."):
-                            # 统一保存为 xlsx 方便读取，或者根据后缀判断
-                            # 这里简单起见，如果传的是csv存csv，xlsx存xlsx，但在 process_data 里我们指定了读取路径
-                            # 为了逻辑简单，直接覆盖 PATH_M (xlsx)。如果用户传csv，最好转存。
-                            # 这里我们使用 smart_read 逻辑，所以文件名后缀不关键，只要路径对
                             save_uploaded_file(new_m, PATH_M)
+                        # 清除缓存，确保下次读取新归属关系
+                        process_data.clear()
                         st.success("归属关系已更新！")
                         st.rerun()
                     else:
@@ -576,43 +579,41 @@ if op_data_ready:
         # =========================================================
         st.markdown("### 🧬 多维视图切换")
         
-        # 准备筛选数据源 (使用门店表)
+        # 使用 4 列布局，使筛选框等宽、整齐
+        f_c1, f_c2, f_c3, f_c4 = st.columns(4)
+        
         # 1. 区域经理
         all_managers = ["全部"] + sorted(list(df_stores["区域经理"].unique())) if "区域经理" in df_stores.columns else ["全部"]
-        sel_mgr = st.selectbox("1️⃣ 区域经理", all_managers, key="filter_mgr")
+        with f_c1:
+            sel_mgr = st.selectbox("1️⃣ 区域经理", all_managers, key="filter_mgr")
         
         # 2. 省份 (基于经理联动)
         df_l2 = df_stores if sel_mgr == "全部" else df_stores[df_stores["区域经理"] == sel_mgr]
         all_provs = ["全部"] + sorted(list(df_l2["省份"].unique())) if "省份" in df_l2.columns else ["全部"]
-        sel_prov = st.selectbox("2️⃣ 省份", all_provs, key="filter_prov")
+        with f_c2:
+            sel_prov = st.selectbox("2️⃣ 省份", all_provs, key="filter_prov")
         
         # 3. 城市 (基于省份联动)
         df_l3 = df_l2 if sel_prov == "全部" else df_l2[df_l2["省份"] == sel_prov]
         all_cities = ["全部"] + sorted(list(df_l3["城市"].unique())) if "城市" in df_l3.columns else ["全部"]
-        
-        # 布局优化：城市和门店在一行
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
+        with f_c3:
             sel_city = st.selectbox("3️⃣ 城市", all_cities, key="filter_city")
         
         # 4. 门店 (基于城市联动)
         df_l4 = df_l3 if sel_city == "全部" else df_l3[df_l3["城市"] == sel_city]
         all_stores = ["全部"] + sorted(list(df_l4["门店名称"].unique()))
-        with f_col2:
+        with f_c4:
             sel_store = st.selectbox("4️⃣ 门店", all_stores, key="filter_store")
 
         # =========================================================
         # 数据过滤逻辑
         # =========================================================
-        # 核心逻辑：如果是"全部"，则展示当前筛选层级下的【聚合数据】
-        # 如果选了具体门店，则展示该门店的详情
         
         filtered_stores = df_l4.copy() # 当前筛选漏斗剩下的所有门店
         
         if sel_store == "全部":
             # 聚合模式：计算 filtered_stores 的总和/平均
             current_df = filtered_stores.copy()
-            # 为了让后续图表显示所有门店的点，我们保留明细行，但在 KPI 计分卡处做 Sum
             
             # 显示标题
             if sel_city != "全部": rank_title = f"🏆 {sel_city} - 门店排名"
