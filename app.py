@@ -683,7 +683,7 @@ if op_data_ready:
             # 单店模式
             current_df = df_advisors[df_advisors["门店名称"] == sel_store].copy()
             current_df["名称"] = current_df["邀约专员/管家"]
-            rank_title = f"👤 {sel_store} - 顾问排名"
+            rank_title = f"👤 {sel_store} - DCC/管家排名"
             
             kpi_leads = current_df["线索量"].sum()
             kpi_visits = current_df["到店量"].sum()
@@ -787,7 +787,7 @@ if op_data_ready:
         # 诊断部分
         st.markdown("---")
         if sel_store != "全部":
-            st.markdown("### 🕵️‍♀️ 顾问深度诊断")
+            st.markdown("### 🕵️‍♀️ 邀约专员/管家深度诊断")
             # 使用 current_df (已经是过滤后的顾问数据)
             diag_df = current_df.copy()
             if "线索量" in diag_df.columns:
@@ -853,7 +853,7 @@ if op_data_ready:
                     # --- D3: AI 诊断 ---
                     with d3:
                         if has_score:
-                            st.error("🤖 AI 智能诊断建议")
+                            st.error("🤖 诊断建议")
                             
                             val_60s = 0 if pd.isna(p.get("S_60s", np.nan)) else float(p.get("S_60s"))
                             
