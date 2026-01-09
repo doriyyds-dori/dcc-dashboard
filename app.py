@@ -416,6 +416,8 @@ def process_data(path_f, path_d, path_a, path_s):
             df_a[c] = _to_1d_numeric(df_a[c])
 
         # Sanitize column names to handle corrupted characters
+        # The '�' character is the Unicode replacement character (U+FFFD) that appears
+        # when character encoding fails. It should not appear in legitimate column names.
         if any("�" in str(col) for col in df_a.columns):
             # Clean corrupted column names
             df_a.columns = df_a.columns.astype(str).str.strip().str.replace("�", "", regex=False)
@@ -424,7 +426,9 @@ def process_data(path_f, path_d, path_a, path_s):
         if "通话时长" in df_a.columns:
             df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
         else:
-            df_a["通话时长"] = 0  # Default or fallback value for missing data
+            # Default to 0 if column is missing or corrupted beyond recognition
+            # This ensures calculations depending on this metric don't fail
+            df_a["通话时长"] = 0
 
         if "外呼接通率" not in df_a.columns:
             df_a["外呼接通率"] = safe_div(df_a, "conn_num", "conn_denom")
