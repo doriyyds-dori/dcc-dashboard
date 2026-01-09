@@ -447,44 +447,53 @@ def process_data(path_f, path_d, path_a, path_s):
             
             full_advisors = pd.merge(full_advisors, df_d, on="邀约专员/管家", how="left", suffixes=("", "_dcc"))
 
-        # 合并 2: 计算 AMS 门店级汇总数据
-        if "门店名称" in df_a.columns and len(all_ams_calc_cols) > 0:
-            ams_by_store = df_a.groupby("门店名称").agg({
-                "conn_num": "sum", "conn_denom": "sum",
-                "timely_num": "sum", "timely_denom": "sum",
-                "call2_num": "sum", "call2_denom": "sum",
-                "call3_num": "sum", "call3_denom": "sum",
-                "通话时长": "mean"
-            }).reset_index()
+        # 合并 2: 合并 AMS 过程数据 (个人维度)
+        # ------------------------------------------
+        # 我们需要保留每个顾问的独立数据
+        cols_ams_needed = [c for c in all_ams_calc_cols if c in df_a.columns]
+        if "通话时长" in df_a.columns:
+            cols_ams_needed.append("通话时长")
             
-            # 将 AMS 门店级数据合并回 顾问明细表 (按门店匹配)
-            # 因为之前执行了 ffill，full_advisors 中的门店名称现在是完整的，可以正确匹配
-            full_advisors = pd.merge(full_advisors, ams_by_store, on="门店名称", how="left")
-            
+        # 优先尝试 (门店+姓名) 匹配，如果失败则尝试 (姓名)
+        join_on = []
+        if "门店名称" in df_a.columns and "门店名称" in full_advisors.columns:
+            join_on = ["门店名称", "邀约专员/管家"]
         else:
-            cols_ams_advisors = ["邀约专员/管家"] + [c for c in df_a.columns if c not in ["邀约专员/管家", "门店名称"]]
-            full_advisors = pd.merge(full_advisors, df_a[cols_ams_advisors], on="邀约专员/管家", how="left", suffixes=("", "_ams"))
-
-        # 合并 3: 生成 门店级 最终宽表
+            join_on = ["邀约专员/管家"]
+            
+        cols_for_merge = join_on + cols_ams_needed
+        cols_for_merge = list(set(cols_for_merge))
+        
+        full_advisors = pd.merge(full_advisors, df_a[cols_for_merge], on=join_on, how="left", suffixes=("", "_ams"))
+        
+        # 合并 3: 生成 门店级 最终宽表 (Full Stores)
+        # ------------------------------------------
         cols_to_fill_zero = ["线索量", "到店量", "通话时长"] + all_ams_calc_cols
         for c in cols_to_fill_zero:
             if c in full_advisors.columns:
                 full_advisors[c] = pd.to_numeric(full_advisors[c], errors="coerce").fillna(0)
+                
+        # 计算个人维度的率 (用于散点图)
+        full_advisors["外呼接通率"] = safe_div(full_advisors, "conn_num", "conn_denom")
+        full_advisors["DCC及时处理率"] = safe_div(full_advisors, "timely_num", "timely_denom")
+        full_advisors["DCC二次外呼率"] = safe_div(full_advisors, "call2_num", "call2_denom")
+        full_advisors["DCC三次外呼率"] = safe_div(full_advisors, "call3_num", "call3_denom")
 
-        ams_agg_dict = {c: "sum" for c in all_ams_calc_cols}
-        if "门店名称" in full_advisors.columns and all(c in full_advisors.columns for c in all_ams_calc_cols):
-            store_ams_final = full_advisors.groupby("门店名称").agg(ams_agg_dict).reset_index()
+        # 生成门店级宽表
+        # 为了保证门店数据的全面性，我们直接从 AMS 原表聚合门店数据
+        if "门店名称" in df_a.columns and len(all_ams_calc_cols) > 0:
+             ams_store_agg = df_a.groupby("门店名称").agg({c:"sum" for c in all_ams_calc_cols}).reset_index()
+             # Calculate rates for store
+             ams_store_agg["外呼接通率"] = safe_div(ams_store_agg, "conn_num", "conn_denom")
+             ams_store_agg["DCC及时处理率"] = safe_div(ams_store_agg, "timely_num", "timely_denom")
+             ams_store_agg["DCC二次外呼率"] = safe_div(ams_store_agg, "call2_num", "call2_denom")
+             ams_store_agg["DCC三次外呼率"] = safe_div(ams_store_agg, "call3_num", "call3_denom")
+             
+             full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
+             full_stores = pd.merge(full_stores, ams_store_agg, on="门店名称", how="left")
         else:
-            store_ams_final = pd.DataFrame(columns=["门店名称"] + all_ams_calc_cols)
-
-        if not store_ams_final.empty:
-            store_ams_final["外呼接通率"] = safe_div(store_ams_final, "conn_num", "conn_denom")
-            store_ams_final["DCC及时处理率"] = safe_div(store_ams_final, "timely_num", "timely_denom")
-            store_ams_final["DCC二次外呼率"] = safe_div(store_ams_final, "call2_num", "call2_denom")
-            store_ams_final["DCC三次外呼率"] = safe_div(store_ams_final, "call3_num", "call3_denom")
-
-        full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
-        full_stores = pd.merge(full_stores, store_ams_final, on="门店名称", how="left")
+             # Fallback
+             full_stores = pd.merge(df_store_data, df_s, on="门店名称", how="left")
 
         full_stores["质检总分"] = full_stores.get("SR_质检总分")
         full_stores["S_60s"] = full_stores.get("SR_S_60s")
