@@ -356,13 +356,13 @@ def process_data(path_f, path_d, path_a, path_s):
             
         store_name = store_name.str.strip()
 
-        col_total = _pick_any_col(raw_s, ["质检总分", "总分"], exclude=["显示"])
-        col_60s = _pick_any_col(raw_s, ["60秒", "60 秒"], exclude=[])
-        col_needs = _pick_any_col(raw_s, ["用车需求"], exclude=[])
-        col_car = _pick_any_col(raw_s, ["车型信息"], exclude=[])
-        col_policy = _pick_any_col(raw_s, ["政策"], exclude=[])
-        col_time = _pick_any_col(raw_s, ["明确到店", "到店时间"], exclude=[])
-        col_wechat = _pick_any_col(raw_s, ["添加微信", "加微信", "加微"], exclude=[])
+        col_total = _pick_any_col(raw_s, ["质检总分", "总分"], exclude_keywords=["显示"])
+        col_60s = _pick_any_col(raw_s, ["60秒", "60 秒"], exclude_keywords=[])
+        col_needs = _pick_any_col(raw_s, ["用车需求"], exclude_keywords=[])
+        col_car = _pick_any_col(raw_s, ["车型信息"], exclude_keywords=[])
+        col_policy = _pick_any_col(raw_s, ["政策"], exclude_keywords=[])
+        col_time = _pick_any_col(raw_s, ["明确到店", "到店时间"], exclude_keywords=[])
+        col_wechat = _pick_any_col(raw_s, ["添加微信", "加微信", "加微"], exclude_keywords=[])
 
         df_s = pd.DataFrame({"门店名称": store_name})
 
