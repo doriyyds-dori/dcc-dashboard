@@ -450,22 +450,29 @@ def process_data(path_f, path_d, path_a, path_s, path_m):
             # 关联门店表
             full_stores["Join_Key"] = strict_clean_str(full_stores["门店名称"])
             full_stores = pd.merge(full_stores, df_mapping, on="Join_Key", how="left", suffixes=("", "_map"))
-            # 修正关联后的列名（如果原表已有这些列，优先用 mapping 的）
+            # 修正关联后的列名
             for c in ["区域经理", "省份", "城市"]:
                 if f"{c}_map" in full_stores.columns:
                     full_stores[c] = full_stores[f"{c}_map"].fillna("未知")
-                elif c not in full_stores.columns:
+                elif c in full_stores.columns:
+                     # 关键修复：如果原表有列但没匹配上，也要填未知，防止出现 NaN
+                     full_stores[c] = full_stores[c].fillna("未知")
+                else:
                     full_stores[c] = "未知"
+            
             full_stores.drop(columns=["Join_Key"] + [c for c in full_stores.columns if c.endswith("_map")], inplace=True)
             
-            # 关联顾问表 (为了让顾问表也有区域信息，虽然主要筛选是靠门店)
+            # 关联顾问表
             full_advisors["Join_Key"] = strict_clean_str(full_advisors["门店名称"])
             full_advisors = pd.merge(full_advisors, df_mapping, on="Join_Key", how="left", suffixes=("", "_map"))
             for c in ["区域经理", "省份", "城市"]:
                 if f"{c}_map" in full_advisors.columns:
                     full_advisors[c] = full_advisors[f"{c}_map"].fillna("未知")
-                elif c not in full_advisors.columns:
+                elif c in full_advisors.columns:
+                    full_advisors[c] = full_advisors[c].fillna("未知")
+                else:
                     full_advisors[c] = "未知"
+            
             full_advisors.drop(columns=["Join_Key"] + [c for c in full_advisors.columns if c.endswith("_map")], inplace=True)
         else:
             # 如果没有 Mapping 文件，给默认值防止报错
@@ -583,25 +590,46 @@ if op_data_ready:
         f_c1, f_c2, f_c3, f_c4 = st.columns(4)
         
         # 1. 区域经理
-        all_managers = ["全部"] + sorted(list(df_stores["区域经理"].unique())) if "区域经理" in df_stores.columns else ["全部"]
+        # 强制转换为字符串再提取 unique，防止 TypeError (NaN vs String)
+        if "区域经理" in df_stores.columns:
+            mgr_list = sorted(df_stores["区域经理"].dropna().astype(str).unique().tolist())
+        else:
+            mgr_list = []
+        all_managers = ["全部"] + mgr_list
+
         with f_c1:
             sel_mgr = st.selectbox("1️⃣ 区域经理", all_managers, key="filter_mgr")
         
         # 2. 省份 (基于经理联动)
         df_l2 = df_stores if sel_mgr == "全部" else df_stores[df_stores["区域经理"] == sel_mgr]
-        all_provs = ["全部"] + sorted(list(df_l2["省份"].unique())) if "省份" in df_l2.columns else ["全部"]
+        if "省份" in df_l2.columns:
+            prov_list = sorted(df_l2["省份"].dropna().astype(str).unique().tolist())
+        else:
+            prov_list = []
+        all_provs = ["全部"] + prov_list
+        
         with f_c2:
             sel_prov = st.selectbox("2️⃣ 省份", all_provs, key="filter_prov")
         
         # 3. 城市 (基于省份联动)
         df_l3 = df_l2 if sel_prov == "全部" else df_l2[df_l2["省份"] == sel_prov]
-        all_cities = ["全部"] + sorted(list(df_l3["城市"].unique())) if "城市" in df_l3.columns else ["全部"]
+        if "城市" in df_l3.columns:
+            city_list = sorted(df_l3["城市"].dropna().astype(str).unique().tolist())
+        else:
+            city_list = []
+        all_cities = ["全部"] + city_list
+        
         with f_c3:
             sel_city = st.selectbox("3️⃣ 城市", all_cities, key="filter_city")
         
         # 4. 门店 (基于城市联动)
         df_l4 = df_l3 if sel_city == "全部" else df_l3[df_l3["城市"] == sel_city]
-        all_stores = ["全部"] + sorted(list(df_l4["门店名称"].unique()))
+        if "门店名称" in df_l4.columns:
+            store_list = sorted(df_l4["门店名称"].dropna().astype(str).unique().tolist())
+        else:
+            store_list = []
+        all_stores = ["全部"] + store_list
+
         with f_c4:
             sel_store = st.selectbox("4️⃣ 门店", all_stores, key="filter_store")
 
