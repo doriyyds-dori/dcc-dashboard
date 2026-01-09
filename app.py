@@ -415,9 +415,16 @@ def process_data(path_f, path_d, path_a, path_s):
                 df_a[c] = 0
             df_a[c] = _to_1d_numeric(df_a[c])
 
-        if "通话时长" not in df_a.columns:
-            df_a["通话时长"] = 0
-        df_a["通话时长"] = _to_1d_numeric(df_a["通话时��"])
+        # Sanitize column names to handle corrupted characters
+        if any("�" in str(col) for col in df_a.columns):
+            # Clean corrupted column names
+            df_a.columns = df_a.columns.astype(str).str.strip().str.replace("�", "", regex=False)
+            
+        # Check and process '通话时长' column after cleaning
+        if "通话时长" in df_a.columns:
+            df_a["通话时长"] = _to_1d_numeric(df_a["通话时长"])
+        else:
+            df_a["通话时长"] = 0  # Default or fallback value for missing data
 
         if "外呼接通率" not in df_a.columns:
             df_a["外呼接通率"] = safe_div(df_a, "conn_num", "conn_denom")
