@@ -813,8 +813,8 @@ if op_data_ready:
 
         p1.metric("📞 外呼接通率", f"{avg_conn:.1%}")
         p2.metric("⚡ DCC及时处理率", f"{avg_timely:.1%}")
-        p3.metric("🔄 二次外呼率", f"{avg_call2:. 1%}")
-        p4.metric("🔁 三次外呼率", f"{avg_call3:. 1%}")
+        p3.metric("🔄 二次外呼率", f"{avg_call2:.1%}")
+        p4.metric("🔁 三次外呼率", f"{avg_call3:.1%}")
         
         plot_df_vis = current_df. copy()
         plot_df_vis["质检总分_显示"] = plot_df_vis. get("质检总分", pd.Series([0]*len(plot_df_vis))).fillna(0)
@@ -851,7 +851,7 @@ if op_data_ready:
 
         st.markdown("---")
 
-        c_left, c_right = st.columns([1, 2])
+        c_left, c_right = st.columns([1,2])
         with c_left:
             st.markdown(f"### {rank_title}")
             if "线索到店率_数值" in current_df.columns:
@@ -861,7 +861,7 @@ if op_data_ready:
                 st. dataframe(
                     rank_df[["名称", "线索到店率", "质检总分"]],
                     hide_index=True, use_container_width=True, height=400,
-                    column_config={"质检总分": st.column_config. NumberColumn(format="%. 1f")}
+                    column_config={"质检总分": st.column_config. NumberColumn(format="%.1f")}
                 )
             else:  st.warning("无排行数据")
 
@@ -894,7 +894,7 @@ if op_data_ready:
                 if not p_row. empty:
                     p = p_row.iloc[0]
 
-                    d1, d2, d3 = st.columns([1, 1, 1.2])
+                    d1, d2, d3 = st.columns([1,1,1.2])
                     
                     with d1:
                         st.caption("转化漏斗 (RESULT)")
@@ -912,7 +912,7 @@ if op_data_ready:
                         fig_f.update_layout(showlegend=False, height=180, margin=dict(t=0, b=0, l=0, r=0))
                         st.plotly_chart(fig_f, use_container_width=True)
 
-                        st.metric("线索到店率", p.get("线索到店率", "0. 0%"))
+                        st.metric("线索到店率", p.get("线索到店率", "0.0%"))
                         
                         avg_call_dur = float(pd.to_numeric(p.get("通话时长", 0), errors="coerce") or 0)
                         st.caption(f"平均通话时长: {avg_call_dur:.1f} 秒")
@@ -933,8 +933,8 @@ if op_data_ready:
                             
                             for k, v in metrics.items():
                                 val = 0 if pd. isna(v) else float(v)
-                                c_a, c_b = st.columns([3, 1])
-                                c_a.progress(min(val / 100, 1.0))
+                                c_a, c_b = st.columns([3,1])
+                                c_a.progress(min(val / 100,1.0))
                                 c_b.write(f"{val:.0f}")
                                 st.caption(k)
                         else: 
@@ -947,7 +947,7 @@ if op_data_ready:
                             val_60s = 0 if pd. isna(p. get("S_60s", np.nan)) else float(p.get("S_60s"))
                             
                             other_kpis = {
-                                "明确到店":  (p.get("S_Time", np. nan), "建议使用二选一法锁定时间。"),
+                                "明确到店":  (p.get("S_Time", np.nan), "建议使用二选一法锁定时间。"),
                                 "添加微信": (p.get("S_Wechat", np.nan), "建议以发定位/资料为由加微。"),
                                 "用车需求": (p.get("S_Needs", np.nan), "需加强需求挖掘，至少问清场景/预算/家庭结构。"),
                                 "车型信息": (p. get("S_Car", np.nan), "需提升产品讲解链路，先讲1-2个强卖点。"),
@@ -959,7 +959,7 @@ if op_data_ready:
 
                             if val_60s < 60:
                                 msg = "开场先抛利益点 + 明确下一步动作。"
-                                issues_list.append(f"🟠 **60秒占比 (得分{val_60s:. 1f})** {msg}")
+                                issues_list.append(f"🟠 **60秒占比 (得分{val_60s:.1f})** {msg}")
                                 is_failing = True
 
                             cleaned_others = {}
